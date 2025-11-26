@@ -394,7 +394,7 @@ class SalesforceReportExporter:
         self,
         output_zip_path: str,
         folder_id: str,
-        delay_between_reports: float = 0.5
+        delay_between_reports: float = 1.0
     ) -> Dict[str, Any]:
         """
         Export all reports from a specific folder to a ZIP file.
