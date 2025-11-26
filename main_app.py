@@ -21,13 +21,14 @@ class SalesforceExporterApp(ctk.CTk):
     def __init__(self):
         super().__init__()
         
-        # Window setup
+        # Window setup - CHANGED: 1400x900 -> 1200x800
         self.title("Salesforce Report Exporter")
-        self.geometry("1400x900")
+        self.geometry("1200x800")
         
         # Set theme
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("blue")
+        
         
         # Session data
         self.session_info: Optional[Dict] = None
@@ -37,7 +38,7 @@ class SalesforceExporterApp(ctk.CTk):
         self.reports_by_folder: Dict[str, List[Dict]] = {}
         
         # Selection tracking
-        self.selected_items: Dict[str, Dict] = {}  # item_id -> {type, name, folder_id}
+        self.selected_items: Dict[str, Dict] = {}
         self.is_exporting: bool = False
         self.search_timer = None 
         
@@ -47,8 +48,32 @@ class SalesforceExporterApp(ctk.CTk):
         # Setup UI
         self._setup_ui()
         
+        # Center window on screen - ADDED
+        self.after(100, self._center_window)
+        
         # Start queue processor
         self._process_queue()
+    
+    # ADD THIS NEW METHOD anywhere in your class
+    def _center_window(self):
+        """Center the main window on screen"""
+        # Force window to update and calculate its actual size
+        self.update_idletasks()
+        
+        # Explicitly set the geometry again to ensure it's correct
+        self.geometry("1200x800")
+        
+        # Wait a tiny bit for the geometry to apply
+        self.update_idletasks()
+        
+        # Now calculate center position
+        width = 1200
+        height = 800
+        x = (self.winfo_screenwidth() // 2) - (width // 2)
+        y = (self.winfo_screenheight() // 2) - (height // 2)
+        
+        # Apply the centered geometry
+        self.geometry(f'{width}x{height}+{x}+{y}')
     
     def _setup_ui(self):
         """Setup the main UI layout"""
@@ -70,49 +95,51 @@ class SalesforceExporterApp(ctk.CTk):
         
     def _create_header(self):
         """Create header section with title and login status"""
-        header_frame = ctk.CTkFrame(self, height=80, corner_radius=0)
+        # CHANGED: height=80 -> height=60
+        header_frame = ctk.CTkFrame(self, height=60, corner_radius=0)
         header_frame.grid(row=0, column=0, sticky="ew", padx=0, pady=0)
         header_frame.grid_propagate(False)
         
         # Left side - Title
         left_frame = ctk.CTkFrame(header_frame, fg_color="transparent")
-        left_frame.pack(side="left", fill="both", expand=True, padx=20, pady=10)
+        left_frame.pack(side="left", fill="both", expand=True, padx=15, pady=8)
         
         title_label = ctk.CTkLabel(
             left_frame,
             text="📊 Salesforce Report Exporter",
-            font=ctk.CTkFont(size=22, weight="bold")
+            font=ctk.CTkFont(size=18, weight="bold")  # CHANGED: 22 -> 18
         )
         title_label.pack(anchor="w")
         
         subtitle_label = ctk.CTkLabel(
             left_frame,
             text="Select folders and reports to export",
-            font=ctk.CTkFont(size=12),
+            font=ctk.CTkFont(size=11),  # CHANGED: 12 -> 11
             text_color="gray"
         )
-        subtitle_label.pack(anchor="w", pady=(5, 0))
+        subtitle_label.pack(anchor="w", pady=(3, 0))  # CHANGED: 5 -> 3
         
         # Right side - Login status and button
         right_frame = ctk.CTkFrame(header_frame, fg_color="transparent")
-        right_frame.pack(side="right", padx=20, pady=10)
+        right_frame.pack(side="right", padx=15, pady=8)
         
         self.status_label = ctk.CTkLabel(
             right_frame,
             text="🔴 Not logged in",
-            font=ctk.CTkFont(size=12),
+            font=ctk.CTkFont(size=11),  # CHANGED: 12 -> 11
             text_color="gray"
         )
-        self.status_label.pack(pady=(0, 5))
+        self.status_label.pack(pady=(0, 4))  # CHANGED: 5 -> 4
         
         self.login_button = ctk.CTkButton(
             right_frame,
             text="Login to Salesforce",
             command=self._open_login_window,
-            width=150,
-            height=32
+            width=140,  # CHANGED: 150 -> 140
+            height=28   # CHANGED: 32 -> 28
         )
         self.login_button.pack()
+
     
     def _create_main_content(self):
         """Create main content area with 3 panels: Available | Actions | Selected"""
@@ -134,50 +161,50 @@ class SalesforceExporterApp(ctk.CTk):
         """Create left panel - Available folders and reports"""
         
         left_panel = ctk.CTkFrame(parent)
-        left_panel.grid(row=0, column=0, sticky="nsew", padx=(10, 5), pady=10)
-        left_panel.grid_rowconfigure(2, weight=1)
+        left_panel.grid(row=0, column=0, sticky="nsew", padx=(8, 4), pady=8)  # CHANGED: padx
+        left_panel.grid_rowconfigure(3, weight=1)  # CHANGED: row 2 -> 3
         left_panel.grid_columnconfigure(0, weight=1)
         
         # Header
         header_label = ctk.CTkLabel(
             left_panel,
             text="Available Items",
-            font=ctk.CTkFont(size=16, weight="bold")
+            font=ctk.CTkFont(size=14, weight="bold")  # CHANGED: 16 -> 14
         )
-        header_label.grid(row=0, column=0, sticky="w", padx=15, pady=(15, 10))
+        header_label.grid(row=0, column=0, sticky="w", padx=12, pady=(12, 8))  # CHANGED: padx, pady
         
         # "All Folders" button
         self.all_folders_btn = ctk.CTkButton(
             left_panel,
             text="📁 All Folders",
             command=self._load_all_folders,
-            height=35,
+            height=32,  # CHANGED: 35 -> 32
             fg_color="#1f6aa5",
             hover_color="#144870",
             state="disabled"
         )
-        self.all_folders_btn.grid(row=1, column=0, sticky="ew", padx=15, pady=(0, 10))
+        self.all_folders_btn.grid(row=1, column=0, sticky="ew", padx=12, pady=(0, 8))  # CHANGED: padx, pady
         
         # Search box
         search_frame = ctk.CTkFrame(left_panel, fg_color="transparent")
-        search_frame.grid(row=2, column=0, sticky="ew", padx=15, pady=(0, 10))
+        search_frame.grid(row=2, column=0, sticky="ew", padx=12, pady=(0, 8))  # CHANGED: padx, pady
         search_frame.grid_columnconfigure(0, weight=1)
         
         self.left_search_entry = ctk.CTkEntry(
             search_frame,
             placeholder_text="🔍 Search folders and reports...",
-            height=32
+            height=28  # CHANGED: 32 -> 28
         )
         self.left_search_entry.grid(row=0, column=0, sticky="ew")
         self.left_search_entry.bind("<KeyRelease>", self._on_left_search)
         
-        # Tree view container (using CTkScrollableFrame)
+        # Tree view container
         self.tree_container = ctk.CTkScrollableFrame(
             left_panel,
             fg_color="#2b2b2b",
             corner_radius=5
         )
-        self.tree_container.grid(row=3, column=0, sticky="nsew", padx=15, pady=(0, 15))
+        self.tree_container.grid(row=3, column=0, sticky="nsew", padx=12, pady=(0, 12))  # CHANGED: padx, pady
         self.tree_container.grid_columnconfigure(0, weight=1)
         
         # Placeholder
@@ -185,11 +212,11 @@ class SalesforceExporterApp(ctk.CTk):
             self.tree_container,
             text="Please login to load folders and reports",
             text_color="gray",
-            font=ctk.CTkFont(size=12)
+            font=ctk.CTkFont(size=11)  # CHANGED: 12 -> 11
         )
-        self.tree_placeholder.grid(row=0, column=0, pady=30)
+        self.tree_placeholder.grid(row=0, column=0, pady=20)
         
-        # Store reference to tree items (folder_id -> {frame, checkbox, reports_frame, expanded, checkbox_var})
+        # Store reference to tree items
         self.tree_items: Dict[str, Dict] = {}
     
     
@@ -197,7 +224,7 @@ class SalesforceExporterApp(ctk.CTk):
         """Create right panel - Selected items for export"""
         
         right_panel = ctk.CTkFrame(parent)
-        right_panel.grid(row=0, column=1, sticky="nsew", padx=(5, 10), pady=10) 
+        right_panel.grid(row=0, column=1, sticky="nsew", padx=(4, 8), pady=8)  # CHANGED: padx
         right_panel.grid_rowconfigure(2, weight=1)
         right_panel.grid_columnconfigure(0, weight=1)
         
@@ -205,26 +232,26 @@ class SalesforceExporterApp(ctk.CTk):
         header_label = ctk.CTkLabel(
             right_panel,
             text="Selected for Export",
-            font=ctk.CTkFont(size=16, weight="bold")
+            font=ctk.CTkFont(size=14, weight="bold")  # CHANGED: 16 -> 14
         )
-        header_label.grid(row=0, column=0, sticky="w", padx=15, pady=(15, 10))
+        header_label.grid(row=0, column=0, sticky="w", padx=12, pady=(12, 8))  # CHANGED: padx, pady
         
         # Selection count
         self.selection_count_label = ctk.CTkLabel(
             right_panel,
             text="0 reports selected",
-            font=ctk.CTkFont(size=12),
+            font=ctk.CTkFont(size=11),  # CHANGED: 12 -> 11
             text_color="gray"
         )
-        self.selection_count_label.grid(row=1, column=0, sticky="w", padx=15, pady=(0, 10))
+        self.selection_count_label.grid(row=1, column=0, sticky="w", padx=12, pady=(0, 8))  # CHANGED: padx, pady
         
-        # Selected items list (scrollable)
+        # Selected items list
         self.selected_container = ctk.CTkScrollableFrame(
             right_panel,
             fg_color="#2b2b2b",
             corner_radius=5
         )
-        self.selected_container.grid(row=2, column=0, sticky="nsew", padx=15, pady=(0, 15))
+        self.selected_container.grid(row=2, column=0, sticky="nsew", padx=12, pady=(0, 12))  # CHANGED: padx, pady
         self.selected_container.grid_columnconfigure(0, weight=1)
         
         # Placeholder
@@ -232,34 +259,35 @@ class SalesforceExporterApp(ctk.CTk):
             self.selected_container,
             text="No reports selected.\nSelect folders or reports from the left panel.",
             text_color="gray",
-            font=ctk.CTkFont(size=12),
+            font=ctk.CTkFont(size=11),  # CHANGED: 12 -> 11
             justify="center"
         )
-        self.selected_placeholder.grid(row=0, column=0, pady=30)
+        self.selected_placeholder.grid(row=0, column=0, pady=20)
         
         # Actions section
         actions_frame = ctk.CTkFrame(right_panel, fg_color="transparent")
-        actions_frame.grid(row=3, column=0, sticky="ew", padx=15, pady=(0, 15))
+        actions_frame.grid(row=3, column=0, sticky="ew", padx=12, pady=(0, 12))  # CHANGED: padx, pady
         actions_frame.grid_columnconfigure(0, weight=1)
         
         actions_label = ctk.CTkLabel(
             actions_frame,
             text="Actions",
-            font=ctk.CTkFont(size=13, weight="bold")
+            font=ctk.CTkFont(size=12, weight="bold")  # CHANGED: 13 -> 12
         )
-        actions_label.grid(row=0, column=0, sticky="w", pady=(0, 5))
+        actions_label.grid(row=0, column=0, sticky="w", pady=(0, 4))  # CHANGED: 5 -> 4
         
-        # Quick remove all button
+        # Clear all button
         self.clear_selected_button = ctk.CTkButton(
             actions_frame,
             text="Clear All Selected",
             command=self._clear_all_selected,
-            height=35,
+            height=32,  # CHANGED: 35 -> 32
             fg_color="#d32f2f",
             hover_color="#9a2222",
             state="disabled"
         )
-        self.clear_selected_button.grid(row=1, column=0, sticky="ew", pady=(0, 5))
+        self.clear_selected_button.grid(row=1, column=0, sticky="ew", pady=(0, 4))  # CHANGED: 5 -> 4
+        
     
     def _create_bottom_section(self):
         """Create bottom section with file naming, progress, export button, and log"""
@@ -270,100 +298,97 @@ class SalesforceExporterApp(ctk.CTk):
         
         # File naming section
         file_frame = ctk.CTkFrame(bottom_frame)
-        file_frame.grid(row=0, column=0, sticky="ew", padx=10, pady=(10, 5))
+        file_frame.grid(row=0, column=0, sticky="ew", padx=8, pady=(8, 4))  # CHANGED: padx, pady
         file_frame.grid_columnconfigure(1, weight=1)
         
-        # ZIP Filename label
         zip_label = ctk.CTkLabel(
             file_frame,
             text="ZIP Filename:",
-            font=ctk.CTkFont(size=12, weight="bold"),
-            width=120
+            font=ctk.CTkFont(size=11, weight="bold"),  # CHANGED: 12 -> 11
+            width=110  # CHANGED: 120 -> 110
         )
-        zip_label.grid(row=0, column=0, padx=(15, 10), pady=10, sticky="w")
+        zip_label.grid(row=0, column=0, padx=(12, 8), pady=8, sticky="w")  # CHANGED: padx
         
-        # Filename entry
         self.filename_entry = ctk.CTkEntry(
             file_frame,
             placeholder_text="salesforce_reports_20251126_0026.zip",
-            height=35
+            height=30  # CHANGED: 35 -> 30
         )
-        self.filename_entry.grid(row=0, column=1, sticky="ew", padx=(0, 10), pady=10)
+        self.filename_entry.grid(row=0, column=1, sticky="ew", padx=(0, 8), pady=8)
         
-        # Auto-generate timestamp filename
         self._generate_default_filename()
         
         # Save location section
         location_frame = ctk.CTkFrame(bottom_frame)
-        location_frame.grid(row=1, column=0, sticky="ew", padx=10, pady=(0, 5))
+        location_frame.grid(row=1, column=0, sticky="ew", padx=8, pady=(0, 4))  # CHANGED: padx, pady
         location_frame.grid_columnconfigure(1, weight=1)
         
         location_label = ctk.CTkLabel(
             location_frame,
             text="Save Location:",
-            font=ctk.CTkFont(size=12, weight="bold"),
-            width=120
+            font=ctk.CTkFont(size=11, weight="bold"),  # CHANGED: 12 -> 11
+            width=110  # CHANGED: 120 -> 110
         )
-        location_label.grid(row=0, column=0, padx=(15, 10), pady=10, sticky="w")
+        location_label.grid(row=0, column=0, padx=(12, 8), pady=8, sticky="w")  # CHANGED: padx
         
         self.location_entry = ctk.CTkEntry(
             location_frame,
             placeholder_text="Click Browse to select save location...",
-            height=35,
+            height=30,  # CHANGED: 35 -> 30
             state="readonly"
         )
-        self.location_entry.grid(row=0, column=1, sticky="ew", padx=(0, 10), pady=10)
+        self.location_entry.grid(row=0, column=1, sticky="ew", padx=(0, 8), pady=8)
         
         self.browse_button = ctk.CTkButton(
             location_frame,
             text="Browse...",
             command=self._browse_save_location,
-            width=100,
-            height=35
+            width=90,  # CHANGED: 100 -> 90
+            height=30  # CHANGED: 35 -> 30
         )
-        self.browse_button.grid(row=0, column=2, padx=(0, 15), pady=10)
+        self.browse_button.grid(row=0, column=2, padx=(0, 12), pady=8)  # CHANGED: padx
         
         # Export button
         self.export_button = ctk.CTkButton(
             bottom_frame,
             text="🚀 Export Reports",
             command=self._start_export,
-            height=45,
-            font=ctk.CTkFont(size=15, weight="bold"),
+            height=38,  # CHANGED: 45 -> 38
+            font=ctk.CTkFont(size=14, weight="bold"),  # CHANGED: 15 -> 14
             fg_color="#1f6aa5",
             hover_color="#144870",
             state="disabled"
         )
-        self.export_button.grid(row=2, column=0, sticky="ew", padx=10, pady=(0, 5))
+        self.export_button.grid(row=2, column=0, sticky="ew", padx=8, pady=(0, 4))  # CHANGED: padx, pady
         
         # Progress bar
-        self.progress_bar = ctk.CTkProgressBar(bottom_frame, height=20)
-        self.progress_bar.grid(row=3, column=0, sticky="ew", padx=10, pady=(0, 5))
+        self.progress_bar = ctk.CTkProgressBar(bottom_frame, height=16)  # CHANGED: 20 -> 16
+        self.progress_bar.grid(row=3, column=0, sticky="ew", padx=8, pady=(0, 4))  # CHANGED: padx, pady
         self.progress_bar.set(0)
         
         # Progress label
         self.progress_label = ctk.CTkLabel(
             bottom_frame,
             text="Ready to export",
-            font=ctk.CTkFont(size=11),
+            font=ctk.CTkFont(size=10),  # CHANGED: 11 -> 10
             text_color="gray"
         )
-        self.progress_label.grid(row=4, column=0, sticky="w", padx=15, pady=(0, 5))
+        self.progress_label.grid(row=4, column=0, sticky="w", padx=12, pady=(0, 4))  # CHANGED: padx, pady
         
-        # Activity Log section
-        log_frame = ctk.CTkFrame(bottom_frame, height=150)
-        log_frame.grid(row=5, column=0, sticky="ew", padx=10, pady=(5, 10))
+        # Activity Log section - REDUCED HEIGHT
+        log_frame = ctk.CTkFrame(bottom_frame, height=120)  # CHANGED: 150 -> 120
+        log_frame.grid(row=5, column=0, sticky="ew", padx=8, pady=(4, 8))  # CHANGED: padx, pady
         log_frame.grid_propagate(False)
         log_frame.grid_rowconfigure(1, weight=1)
         log_frame.grid_columnconfigure(0, weight=1)
         
         log_header_frame = ctk.CTkFrame(log_frame, fg_color="transparent")
-        log_header_frame.grid(row=0, column=0, sticky="ew", padx=10, pady=(10, 5))
+        log_header_frame.grid(row=0, column=0, sticky="ew", padx=8, pady=(8, 4))  # CHANGED: padx, pady
         
         log_header_label = ctk.CTkLabel(
             log_header_frame,
             text="📋 Activity Log",
-            font=ctk.CTkFont(size=13, weight="bold")
+            font=ctk.CTkFont(size=12, weight="bold")  # CHANGED: 13 -> 12
         )
         log_header_label.pack(side="left")
         
@@ -371,9 +396,9 @@ class SalesforceExporterApp(ctk.CTk):
             log_header_frame,
             text="Clear Log",
             command=self._clear_log,
-            width=80,
-            height=25,
-            font=ctk.CTkFont(size=11)
+            width=70,  # CHANGED: 80 -> 70
+            height=22,  # CHANGED: 25 -> 22
+            font=ctk.CTkFont(size=10)  # CHANGED: 11 -> 10
         )
         clear_log_btn.pack(side="right")
         
@@ -381,10 +406,10 @@ class SalesforceExporterApp(ctk.CTk):
         self.log_textbox = ctk.CTkTextbox(
             log_frame,
             wrap="word",
-            font=ctk.CTkFont(family="Consolas", size=10),
+            font=ctk.CTkFont(family="Consolas", size=9),  # CHANGED: 10 -> 9
             fg_color="#1a1a1a"
         )
-        self.log_textbox.grid(row=1, column=0, sticky="nsew", padx=10, pady=(0, 10))
+        self.log_textbox.grid(row=1, column=0, sticky="nsew", padx=8, pady=(0, 8))  # CHANGED: padx
         self.log_textbox.configure(state="disabled")
     
     def _generate_default_filename(self):
@@ -463,15 +488,12 @@ class SalesforceExporterApp(ctk.CTk):
         self.status_label.configure(text="🔴 Not logged in", text_color="gray")
         self.login_button.configure(text="Login to Salesforce", command=self._open_login_window)
         
-        # Disable buttons
+        # Disable buttons (ONLY the ones that exist)
         self.all_folders_btn.configure(state="disabled")
-        self.add_button.configure(state="disabled")
-        self.remove_button.configure(state="disabled")
-        self.reset_button.configure(state="disabled")
         self.export_button.configure(state="disabled")
         self.clear_selected_button.configure(state="disabled")
         
-        # Clear tree
+        # Clear tree completely
         for widget in self.tree_container.winfo_children():
             widget.destroy()
         
@@ -479,12 +501,38 @@ class SalesforceExporterApp(ctk.CTk):
             self.tree_container,
             text="Please login to load folders and reports",
             text_color="gray",
-            font=ctk.CTkFont(size=12)
+            font=ctk.CTkFont(size=11)
         )
-        self.tree_placeholder.grid(row=0, column=0, pady=30)
+        self.tree_placeholder.grid(row=0, column=0, pady=20)
         
-        # Clear selected panel
-        self._refresh_selected_panel()
+        # Clear selected panel completely
+        for widget in self.selected_container.winfo_children():
+            widget.destroy()
+        
+        self.selected_placeholder = ctk.CTkLabel(
+            self.selected_container,
+            text="No reports selected.\nSelect folders or reports from the left panel.",
+            text_color="gray",
+            font=ctk.CTkFont(size=11),
+            justify="center"
+        )
+        self.selected_placeholder.grid(row=0, column=0, pady=30)
+        
+        # Reset selection count
+        self.selection_count_label.configure(text="0 reports selected", text_color="gray")
+        
+        # Clear output path
+        self.output_zip_path = None
+        self.location_entry.configure(state="normal")
+        self.location_entry.delete(0, "end")
+        self.location_entry.configure(state="readonly")
+        
+        # Reset progress
+        self.progress_bar.set(0)
+        self.progress_label.configure(text="Ready to export", text_color="gray")
+        
+        # Reset filename
+        self._generate_default_filename()
         
         self._log("🔴 Logged out")
     
@@ -495,7 +543,21 @@ class SalesforceExporterApp(ctk.CTk):
         if not self.session_info:
             return
         
+        # Disable button and show loading
         self.all_folders_btn.configure(state="disabled", text="⏳ Loading...")
+        
+        # Show loading indicator in tree
+        for widget in self.tree_container.winfo_children():
+            widget.destroy()
+        
+        loading_label = ctk.CTkLabel(
+            self.tree_container,
+            text="⏳ Loading folders and reports...\nThis may take a moment.",
+            text_color="gray",
+            font=ctk.CTkFont(size=12)
+        )
+        loading_label.grid(row=0, column=0, pady=30)
+        
         self._log("🔄 Fetching folders and reports from Salesforce...")
         
         thread = threading.Thread(target=self._load_data_worker, daemon=True)
@@ -563,19 +625,25 @@ class SalesforceExporterApp(ctk.CTk):
         
         self.available_folders = filtered_folders
         
-        # Count total reports across all folders
+        # Count total reports
         total_reports_in_folders = sum(len(reports) for reports in self.reports_by_folder.values())
         
-        # Populate tree - NO PARAMETERS
-        self._populate_tree()  # ✅ Correct - no parameters
+        # Clear loading indicator
+        for widget in self.tree_container.winfo_children():
+            widget.destroy()
         
+        # Populate tree
+        self._populate_tree()
+        
+        # Re-enable button
         self.all_folders_btn.configure(state="normal", text="📁 All Folders")
         
+        # Log results
         self._log(f"✅ Loaded {len(filtered_folders)} folders")
         self._log(f"✅ Found {total_reports_in_folders} reports across all folders")
         
         if total_reports_in_folders == 0:
-            self._log("⚠️ No reports found in any folder. Check folder permissions.")
+            self._log("⚠️ No reports found. Check folder permissions.")
         
     def _on_data_error(self, error: str):
         """Handle data loading error"""
@@ -1301,18 +1369,24 @@ class SalesforceExporterApp(ctk.CTk):
         """Enable/disable UI during export"""
         state = "normal" if enabled else "disabled"
         
+        # Only manage buttons that actually exist
         self.login_button.configure(state=state)
         self.browse_button.configure(state=state)
         self.all_folders_btn.configure(state=state)
-        self.filename_entry.configure(state=state)
         
+        # Clear Selected button
+        if enabled and len(self.selected_items) > 0:
+            self.clear_selected_button.configure(state="normal")
+        else:
+            self.clear_selected_button.configure(state="disabled")
+        
+        # Filename entry
         if enabled:
+            self.filename_entry.configure(state="normal")
             self._update_export_button_state()
         else:
+            self.filename_entry.configure(state="disabled")
             self.export_button.configure(state="disabled")
-            self.add_button.configure(state="disabled")
-            self.remove_button.configure(state="disabled")
-            self.reset_button.configure(state="disabled")
     
     # ===== QUEUE PROCESSING =====
     

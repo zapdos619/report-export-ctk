@@ -22,7 +22,7 @@ class LoginWindow(ctk.CTkToplevel):
         
         # Window setup - INCREASED HEIGHT
         self.title("Salesforce Login")
-        self.geometry("500x680")
+        self.geometry("500x580")
         self.resizable(False, False)
         
         # Center the window
