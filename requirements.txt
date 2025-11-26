@@ -1,8 +1,11 @@
-# Salesforce Report Exporter - Dependencies
+# Salesforce Report Exporter - CustomTkinter Version
 # Python 3.10+ required
 
-# Qt UI Framework
-PySide6>=6.5.0
+# CustomTkinter UI Framework
+customtkinter>=5.2.0
 
-# HTTP requests
+# HTTP requests for Salesforce API
 requests>=2.31.0
+
+# For better looking widgets (dependency of customtkinter)
+darkdetect>=0.8.0

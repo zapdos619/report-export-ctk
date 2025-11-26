@@ -1,7 +1,5 @@
-# exporter.py
-# Salesforce Report Exporter - Exports reports as CSV using the UI export method
-# Uses DYNAMIC API version matching the org
-# NOW WITH FOLDER SUPPORT!
+# exporter.py - Part 1: Helper Functions and Setup
+# Salesforce Report Exporter with DYNAMIC API version detection
 
 import time
 import tempfile
@@ -129,10 +127,6 @@ def clean_csv_footer(csv_content: str) -> str:
     """
     lines = csv_content.split('\n')
     
-    # Find where the actual data ends and footer begins
-    # Footer typically starts with a row containing "Copyright" or ends with blank lines
-    # followed by metadata
-    
     cleaned_lines = []
     footer_started = False
     blank_line_count = 0
@@ -140,17 +134,13 @@ def clean_csv_footer(csv_content: str) -> str:
     for i, line in enumerate(lines):
         stripped = line.strip()
         
-        # Check if this line starts the footer
         if not footer_started:
-            # Empty line counter
             if not stripped:
                 blank_line_count += 1
-                # Keep the line for now
                 cleaned_lines.append(line)
             else:
                 blank_line_count = 0
                 
-                # Common footer indicators
                 footer_indicators = [
                     'Copyright (c)',
                     'Confidential Information',
@@ -159,37 +149,29 @@ def clean_csv_footer(csv_content: str) -> str:
                     'Do Not Distribute'
                 ]
                 
-                # Check if line contains footer indicators
                 if any(indicator in line for indicator in footer_indicators):
                     footer_started = True
-                    # Remove the blank lines we just added before the footer
                     while cleaned_lines and not cleaned_lines[-1].strip():
                         cleaned_lines.pop()
-                # Also check if this line is ONLY a report name (no commas = not CSV data)
-                # Report names appear as standalone text lines before the footer
                 elif ',' not in stripped and len(stripped) > 0:
-                    # Check if next few lines contain footer indicators
                     next_lines = lines[i+1:min(i+5, len(lines))]
                     next_text = ' '.join(next_lines)
                     if any(indicator in next_text for indicator in footer_indicators):
                         footer_started = True
-                        # Remove blank lines before footer
                         while cleaned_lines and not cleaned_lines[-1].strip():
                             cleaned_lines.pop()
                     else:
                         cleaned_lines.append(line)
                 else:
                     cleaned_lines.append(line)
-        # Once footer starts, ignore all remaining lines
     
-    # Join lines back
     result = '\n'.join(cleaned_lines)
-    
-    # Remove trailing blank lines
     result = result.rstrip('\n')
     
     return result
 
+# exporter.py - Part 2: SalesforceReportExporter Class
+# This continues from Part 1 (helper functions)
 
 class SalesforceReportExporter:
     """
@@ -242,7 +224,6 @@ class SalesforceReportExporter:
         """
         try:
             # Query for Report folders that user has access to
-            # Using SOQL to get folder details
             query = """
                 SELECT Id, Name, Type, DeveloperName, AccessType 
                 FROM Folder 
@@ -250,7 +231,6 @@ class SalesforceReportExporter:
                 AND Name != 'Automated Process'
                 ORDER BY Name
             """
-            
             
             query_url = f"{self.instance_url}/services/data/{self.api_version}/query"
             params = {"q": query}
@@ -281,9 +261,6 @@ class SalesforceReportExporter:
             
         except Exception as e:
             raise Exception(f"Failed to fetch report folders: {str(e)}")
-
-    # exporter.py - COMPLETE FIX with SOQL Query Method
-    # This replaces the list_reports method with a more reliable approach
 
     def list_reports(self, folder_id: str = None) -> List[Dict[str, Any]]:
         """
@@ -361,7 +338,6 @@ class SalesforceReportExporter:
                     "createdDate": record.get("CreatedDate")
                 })
             
-            print(f"Found {len(reports)} reports in folder {folder_id}")
             return reports
             
         except Exception as e:
@@ -408,6 +384,11 @@ class SalesforceReportExporter:
         cleaned_content = clean_csv_footer(content)
         
         return cleaned_content
+    
+    # exporter.py - Part 3: Export Methods
+# This continues the SalesforceReportExporter class
+
+    # Add these methods to the SalesforceReportExporter class
 
     def export_reports_by_folder_to_zip(
         self,
@@ -646,8 +627,11 @@ class SalesforceReportExporter:
                 shutil.rmtree(tmp_dir)
             except Exception:
                 pass
-    # ADD THIS METHOD TO exporter.py (SalesforceReportExporter class)
-    # Place it after export_reports_by_folder_to_zip method
+    
+    # exporter.py - Part 4: Selected Reports Export & Helper Methods
+# This completes the SalesforceReportExporter class
+
+    # Add these final methods to the SalesforceReportExporter class
 
     def export_selected_reports_to_zip(
         self,
@@ -815,3 +799,5 @@ class SalesforceReportExporter:
                 lines.append("")
         
         return "\n".join(lines)
+    
+    

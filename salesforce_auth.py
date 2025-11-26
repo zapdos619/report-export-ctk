@@ -83,8 +83,7 @@ class SalesforceAuth:
         Raises:
             SalesforceAuthError: If authentication fails
         """
-        # Build the login URL - use a base version for SOAP login
-        # (SOAP login works with older versions too)
+        # Build the login URL
         if domain in ('login', 'test'):
             base_url = f"https://{domain}.salesforce.com"
         elif domain.endswith('.salesforce.com'):
@@ -92,7 +91,7 @@ class SalesforceAuth:
         else:
             base_url = f"https://{domain}.salesforce.com"
         
-        # Use a stable SOAP version for login (this always works)
+        # Use a stable SOAP version for login
         login_url = f"{base_url}/services/Soap/u/58.0"
         
         # Combine password and security token
@@ -278,19 +277,3 @@ class SalesforceAuth:
         except:
             pass
         return None
-
-
-def salesforce_login(
-    username: str,
-    password: str,
-    security_token: str = "",
-    domain: str = "login"
-) -> dict:
-    """
-    Quick login to Salesforce.
-    
-    Returns:
-        dict with session_id, instance_url, user_id, org_id, api_version
-    """
-    auth = SalesforceAuth()
-    return auth.login(username, password, security_token, domain)
