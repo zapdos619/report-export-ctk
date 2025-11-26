@@ -1,11 +1,19 @@
 # Salesforce Report Exporter - CustomTkinter Version
 # Python 3.10+ required
+# OPTIMIZED FOR 10,000+ REPORTS
 
-# CustomTkinter UI Framework
+# ===== UI Framework =====
 customtkinter>=5.2.0
 
-# HTTP requests for Salesforce API
+# ===== HTTP requests for Salesforce API =====
 requests>=2.31.0
 
-# For better looking widgets (dependency of customtkinter)
+# ===== Better looking widgets (dependency of customtkinter) =====
 darkdetect>=0.8.0
+
+# ===== NEW: Memory monitoring and process management =====
+psutil>=5.9.0
+
+# ===== Optional but recommended for better performance =====
+# Uncomment if you want faster CSV processing for very large files
+# pandas>=2.0.0
