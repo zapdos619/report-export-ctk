@@ -228,7 +228,6 @@ class SalesforceReportExporter:
                 SELECT Id, Name, Type, DeveloperName, AccessType 
                 FROM Folder 
                 WHERE Type = 'Report' 
-                AND Name != 'Automated Process'
                 ORDER BY Name
             """
             
@@ -641,21 +640,47 @@ class SalesforceReportExporter:
     ) -> Dict[str, Any]:
         """
         Export specific selected reports to a ZIP file.
-        
-        Args:
-            output_zip_path: Path where ZIP file will be saved
-            report_ids: List of report IDs to export
-            delay_between_reports: Seconds to wait between exports (rate limiting)
-            
-        Returns:
-            Dictionary with export results
+        Now uses direct SOQL to ensure system/automated reports are found.
         """
         tmp_dir = Path(tempfile.mkdtemp(prefix="sf_reports_"))
 
         try:
-            # Step 1: Get full report details for selected IDs
-            all_reports = self.list_reports()
-            reports = [r for r in all_reports if r.get("id") in report_ids]
+            # --- CHANGED SECTION START ---
+            # Instead of fetching ALL reports and filtering, we query exactly the IDs we need.
+            # This bypasses API visibility filters that hide "Automated Process" reports.
+            
+            if not report_ids:
+                 reports = []
+            else:
+                # Format IDs for SOQL: 'id1','id2','id3'
+                ids_formatted = ",".join([f"'{rid}'" for rid in report_ids])
+                query = f"SELECT Id, Name, Format FROM Report WHERE Id IN ({ids_formatted})"
+                
+                query_url = f"{self.instance_url}/services/data/{self.api_version}/query"
+                params = {"q": query}
+                
+                # Execute the specific lookup
+                response = requests.get(
+                    query_url, 
+                    headers=self.api_headers, 
+                    params=params, 
+                    timeout=30
+                )
+                
+                if response.status_code == 200:
+                    records = response.json().get("records", [])
+                    reports = []
+                    for record in records:
+                        reports.append({
+                            "id": record.get("Id"),
+                            "name": record.get("Name"),
+                            "reportFormat": record.get("Format", "TABULAR")
+                        })
+                else:
+                    # Fallback: if query fails, try to proceed with just IDs
+                    reports = [{"id": rid, "name": rid, "reportFormat": "TABULAR"} for rid in report_ids]
+
+            # --- CHANGED SECTION END ---
             
             total = len(reports)
             completed = 0
