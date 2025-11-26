@@ -1,5 +1,6 @@
-# login_window.py
+# login_window.py - UPDATED VERSION
 # Salesforce Login Window using CustomTkinter
+# Changes: Increased height to 580px, better padding, improved centering
 
 import customtkinter as ctk
 import threading
@@ -19,9 +20,9 @@ class LoginWindow(ctk.CTkToplevel):
         self.on_login_success = on_login_success
         self.session_info = None
         
-        # Window setup
+        # Window setup - INCREASED HEIGHT
         self.title("Salesforce Login")
-        self.geometry("500x550")
+        self.geometry("500x680")
         self.resizable(False, False)
         
         # Center the window
@@ -45,9 +46,9 @@ class LoginWindow(ctk.CTkToplevel):
     def _setup_ui(self):
         """Setup the login UI"""
         
-        # Main container with padding
+        # Main container with MORE PADDING
         main_frame = ctk.CTkFrame(self, fg_color="transparent")
-        main_frame.pack(fill="both", expand=True, padx=20, pady=20)
+        main_frame.pack(fill="both", expand=True, padx=25, pady=25)
         
         # Header
         header_label = ctk.CTkLabel(
@@ -63,18 +64,18 @@ class LoginWindow(ctk.CTkToplevel):
             font=ctk.CTkFont(size=12),
             text_color="gray"
         )
-        subtitle_label.pack(pady=(0, 20))
+        subtitle_label.pack(pady=(0, 25))
         
-        # Environment selection frame
+        # Environment selection frame - IMPROVED SPACING
         env_frame = ctk.CTkFrame(main_frame)
-        env_frame.pack(fill="x", pady=(0, 15))
+        env_frame.pack(fill="x", pady=(0, 20))
         
         env_label = ctk.CTkLabel(
             env_frame,
             text="Environment:",
             font=ctk.CTkFont(size=13, weight="bold")
         )
-        env_label.pack(anchor="w", padx=15, pady=(15, 5))
+        env_label.pack(anchor="w", padx=15, pady=(15, 8))
         
         # Environment dropdown
         self.env_var = ctk.StringVar(value="Production")
@@ -84,7 +85,7 @@ class LoginWindow(ctk.CTkToplevel):
             values=["Production", "Sandbox"],
             command=self._on_env_change
         )
-        self.env_dropdown.pack(fill="x", padx=15, pady=(0, 10))
+        self.env_dropdown.pack(fill="x", padx=15, pady=(0, 12))
         
         # Custom domain checkbox
         self.custom_domain_var = ctk.BooleanVar(value=False)
@@ -94,7 +95,7 @@ class LoginWindow(ctk.CTkToplevel):
             variable=self.custom_domain_var,
             command=self._on_custom_domain_toggle
         )
-        self.custom_domain_check.pack(anchor="w", padx=15, pady=(0, 5))
+        self.custom_domain_check.pack(anchor="w", padx=15, pady=(0, 8))
         
         # Custom domain entry
         self.custom_domain_entry = ctk.CTkEntry(
@@ -104,39 +105,42 @@ class LoginWindow(ctk.CTkToplevel):
         )
         self.custom_domain_entry.pack(fill="x", padx=15, pady=(0, 15))
         
-        # Credentials frame
+        # Credentials frame - IMPROVED SPACING
         cred_frame = ctk.CTkFrame(main_frame)
-        cred_frame.pack(fill="x", pady=(0, 15))
+        cred_frame.pack(fill="x", pady=(0, 20))
         
         cred_label = ctk.CTkLabel(
             cred_frame,
             text="Credentials:",
             font=ctk.CTkFont(size=13, weight="bold")
         )
-        cred_label.pack(anchor="w", padx=15, pady=(15, 5))
+        cred_label.pack(anchor="w", padx=15, pady=(15, 8))
         
         # Username
         self.username_entry = ctk.CTkEntry(
             cred_frame,
-            placeholder_text="your.email@company.com"
+            placeholder_text="your.email@company.com",
+            height=35
         )
-        self.username_entry.pack(fill="x", padx=15, pady=(5, 10))
+        self.username_entry.pack(fill="x", padx=15, pady=(5, 12))
         
         # Password
         self.password_entry = ctk.CTkEntry(
             cred_frame,
             placeholder_text="Password",
-            show="●"
+            show="●",
+            height=35
         )
-        self.password_entry.pack(fill="x", padx=15, pady=(0, 10))
+        self.password_entry.pack(fill="x", padx=15, pady=(0, 12))
         
         # Security Token
         self.token_entry = ctk.CTkEntry(
             cred_frame,
             placeholder_text="Security Token (optional if IP whitelisted)",
-            show="●"
+            show="●",
+            height=35
         )
-        self.token_entry.pack(fill="x", padx=15, pady=(0, 10))
+        self.token_entry.pack(fill="x", padx=15, pady=(0, 12))
         
         # Token info label
         token_info = ctk.CTkLabel(
@@ -147,22 +151,23 @@ class LoginWindow(ctk.CTkToplevel):
         )
         token_info.pack(anchor="w", padx=15, pady=(0, 15))
         
-        # Login button
+        # Login button - SLIGHTLY TALLER
         self.login_button = ctk.CTkButton(
             main_frame,
             text="Login to Salesforce",
             command=self._on_login_click,
-            height=40,
+            height=42,
             font=ctk.CTkFont(size=14, weight="bold")
         )
-        self.login_button.pack(fill="x", pady=(0, 10))
+        self.login_button.pack(fill="x", pady=(0, 12))
         
-        # Status label
+        # Status label - MORE SPACE
         self.status_label = ctk.CTkLabel(
             main_frame,
             text="",
             font=ctk.CTkFont(size=11),
-            text_color="gray"
+            text_color="gray",
+            wraplength=450
         )
         self.status_label.pack(pady=(5, 0))
         
@@ -242,7 +247,6 @@ class LoginWindow(ctk.CTkToplevel):
         
         instance = session_info.get("instance_url", "")
         api_version = session_info.get("api_version", "")
-        user_name = session_info.get("user_name", "")
         
         status_msg = f"✅ Connected to {instance.replace('https://', '')}"
         if api_version:
