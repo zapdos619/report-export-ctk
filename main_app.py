@@ -39,6 +39,7 @@ class SalesforceExporterApp(ctk.CTk):
         # Selection tracking
         self.selected_items: Dict[str, Dict] = {}  # item_id -> {type, name, folder_id}
         self.is_exporting: bool = False
+        self.search_timer = None 
         
         # Queue for thread-safe UI updates
         self.update_queue = queue.Queue()
@@ -120,17 +121,13 @@ class SalesforceExporterApp(ctk.CTk):
         content_frame = ctk.CTkFrame(self, corner_radius=0)
         content_frame.grid(row=1, column=0, sticky="nsew", padx=0, pady=0)
         content_frame.grid_rowconfigure(0, weight=1)
-        content_frame.grid_columnconfigure(0, weight=2)  # Left panel (wider)
-        content_frame.grid_columnconfigure(1, weight=0)  # Middle panel (fixed)
-        content_frame.grid_columnconfigure(2, weight=2)  # Right panel (wider)
+        content_frame.grid_columnconfigure(0, weight=1)  # Left panel
+        content_frame.grid_columnconfigure(1, weight=1)  # Right panel (removed middle)
         
         # LEFT PANEL - Available Items
         self._create_left_panel(content_frame)
         
-        # MIDDLE PANEL - Action Buttons
-        self._create_middle_panel(content_frame)
-        
-        # RIGHT PANEL - Selected Items
+        # RIGHT PANEL - Selected Items (changed column from 2 to 1)
         self._create_right_panel(content_frame)
     
     def _create_left_panel(self, parent):
@@ -195,69 +192,12 @@ class SalesforceExporterApp(ctk.CTk):
         # Store reference to tree items (folder_id -> {frame, checkbox, reports_frame, expanded, checkbox_var})
         self.tree_items: Dict[str, Dict] = {}
     
-    def _create_middle_panel(self, parent):
-        """Create middle panel - Action buttons"""
-        
-        middle_panel = ctk.CTkFrame(parent, width=150)
-        middle_panel.grid(row=0, column=1, sticky="ns", padx=5, pady=10)  # Changed to "ns" instead of "nsew"
-        middle_panel.grid_propagate(False)
-        
-        # Center the buttons container
-        button_container = ctk.CTkFrame(middle_panel, fg_color="transparent")
-        button_container.place(relx=0.5, rely=0.5, anchor="center")  # Center vertically and horizontally
-        
-        # Add button
-        self.add_button = ctk.CTkButton(
-            button_container,
-            text="Add >>",
-            command=self._add_selected_to_export,
-            width=120,
-            height=40,
-            fg_color="#2fa572",
-            hover_color="#208856",
-            font=ctk.CTkFont(size=13, weight="bold"),
-            state="disabled"
-        )
-        self.add_button.pack(pady=5)
-        
-        # Remove button
-        self.remove_button = ctk.CTkButton(
-            button_container,
-            text="<< Remove",
-            command=self._remove_selected_from_export,
-            width=120,
-            height=40,
-            fg_color="#d32f2f",
-            hover_color="#9a2222",
-            font=ctk.CTkFont(size=13, weight="bold"),
-            state="disabled"
-        )
-        self.remove_button.pack(pady=5)
-        
-        # Separator
-        separator = ctk.CTkFrame(button_container, height=2, width=100, fg_color="gray")
-        separator.pack(pady=15)
-        
-        # Reset selection button
-        self.reset_button = ctk.CTkButton(
-            button_container,
-            text="Reset Selection",
-            command=self._reset_all_selections,
-            width=120,
-            height=40,
-            fg_color="#666666",
-            hover_color="#555555",
-            font=ctk.CTkFont(size=12),
-            state="disabled"
-        )
-        self.reset_button.pack(pady=5)
-    
     
     def _create_right_panel(self, parent):
         """Create right panel - Selected items for export"""
         
         right_panel = ctk.CTkFrame(parent)
-        right_panel.grid(row=0, column=2, sticky="nsew", padx=(5, 10), pady=10)
+        right_panel.grid(row=0, column=1, sticky="nsew", padx=(5, 10), pady=10) 
         right_panel.grid_rowconfigure(2, weight=1)
         right_panel.grid_columnconfigure(0, weight=1)
         
@@ -499,9 +439,6 @@ class SalesforceExporterApp(ctk.CTk):
         
         # Enable buttons - ADD THESE LINES
         self.all_folders_btn.configure(state="normal")
-        self.add_button.configure(state="normal")
-        self.remove_button.configure(state="normal")
-        self.reset_button.configure(state="normal")
         
         # Log success
         self._log(f"✅ Login successful: {instance}")
@@ -629,8 +566,8 @@ class SalesforceExporterApp(ctk.CTk):
         # Count total reports across all folders
         total_reports_in_folders = sum(len(reports) for reports in self.reports_by_folder.values())
         
-        # Populate tree
-        self._populate_tree()
+        # Populate tree - NO PARAMETERS
+        self._populate_tree()  # ✅ Correct - no parameters
         
         self.all_folders_btn.configure(state="normal", text="📁 All Folders")
         
@@ -639,7 +576,7 @@ class SalesforceExporterApp(ctk.CTk):
         
         if total_reports_in_folders == 0:
             self._log("⚠️ No reports found in any folder. Check folder permissions.")
-    
+        
     def _on_data_error(self, error: str):
         """Handle data loading error"""
         self.all_folders_btn.configure(state="normal", text="📁 All Folders")
@@ -650,8 +587,7 @@ class SalesforceExporterApp(ctk.CTk):
     
     def _populate_tree(self, search_term: str = ""):
         """Populate the tree view with folders and reports"""
-        self._log(f"DEBUG: Populating tree with {len(self.available_folders)} folders")
-        self._log(f"DEBUG: reports_by_folder has {len(self.reports_by_folder)} entries")
+        
         # Clear existing tree
         for widget in self.tree_container.winfo_children():
             widget.destroy()
@@ -669,30 +605,50 @@ class SalesforceExporterApp(ctk.CTk):
             return
         
         # Filter folders and reports by search term
-        filtered_folders = self.available_folders
+        filtered_folders_data = []
+        
         if search_term:
             search_lower = search_term.lower()
             
-            # Filter folders that match search OR have reports that match
-            filtered_folders = []
             for folder in self.available_folders:
-                folder_name = folder.get("name", "").lower()
                 folder_id = folder.get("id")
+                folder_name = folder.get("name", "")
+                
+                # Get all reports in this folder
+                all_reports = self.reports_by_folder.get(folder_id, [])
                 
                 # Check if folder name matches
-                folder_matches = search_lower in folder_name
+                folder_matches = search_lower in folder_name.lower()
                 
-                # Check if any report in this folder matches
-                reports_in_folder = self.reports_by_folder.get(folder.get("name", ""), [])
-                report_matches = any(
-                    search_lower in report.get("name", "").lower()
-                    for report in reports_in_folder
-                )
-                
-                if folder_matches or report_matches:
-                    filtered_folders.append(folder)
+                if folder_matches:
+                    # Folder matches - include ALL reports in this folder
+                    filtered_folders_data.append({
+                        "folder": folder,
+                        "reports": all_reports
+                    })
+                else:
+                    # Folder doesn't match - check if any reports match
+                    matching_reports = [
+                        r for r in all_reports
+                        if search_lower in r.get("name", "").lower()
+                    ]
+                    
+                    if matching_reports:
+                        # Include folder with only matching reports
+                        filtered_folders_data.append({
+                            "folder": folder,
+                            "reports": matching_reports
+                        })
+        else:
+            # No search - show all folders with all reports
+            for folder in self.available_folders:
+                folder_id = folder.get("id")
+                filtered_folders_data.append({
+                    "folder": folder,
+                    "reports": self.reports_by_folder.get(folder_id, [])
+                })
         
-        if not filtered_folders and search_term:
+        if not filtered_folders_data and search_term:
             placeholder = ctk.CTkLabel(
                 self.tree_container,
                 text=f"No results found for '{search_term}'",
@@ -703,26 +659,22 @@ class SalesforceExporterApp(ctk.CTk):
             return
         
         # Create tree items for each folder
-        for idx, folder in enumerate(filtered_folders):
-            self._create_folder_item(idx, folder, search_term)
-    
-    def _create_folder_item(self, row: int, folder: Dict, search_term: str = ""):
+        for idx, folder_data in enumerate(filtered_folders_data):
+            self._create_folder_item(
+                idx, 
+                folder_data["folder"], 
+                folder_data["reports"]
+            )
+        
+    def _create_folder_item(self, row: int, folder: Dict, reports_to_show: List[Dict]):
         """Create a folder item in the tree"""
         
         folder_id = folder.get("id")
         folder_name = folder.get("name", "Unnamed Folder")
         folder_type = folder.get("type", "")
         
-        # Get reports for this folder using folder_id
-        reports_in_folder = self.reports_by_folder.get(folder_id, [])
-        
-        # Filter reports by search term if provided
-        if search_term:
-            search_lower = search_term.lower()
-            reports_in_folder = [
-                r for r in reports_in_folder
-                if search_lower in r.get("name", "").lower()
-            ]
+        # Use the filtered reports passed in (not from self.reports_by_folder)
+        reports_in_folder = reports_to_show
         
         # Main folder frame
         folder_frame = ctk.CTkFrame(self.tree_container, fg_color="#333333", corner_radius=5)
@@ -949,9 +901,20 @@ class SalesforceExporterApp(ctk.CTk):
         self._refresh_selected_panel()
     
     def _on_left_search(self, event):
-        """Handle search in left panel"""
+        """Handle search in left panel with debouncing"""
+        
+        # Cancel previous timer if it exists
+        if self.search_timer is not None:
+            self.after_cancel(self.search_timer)
+        
+        # Set new timer - wait 300ms after user stops typing
+        self.search_timer = self.after(300, self._execute_search)
+
+    def _execute_search(self):
+        """Execute the actual search after debounce delay"""
         search_term = self.left_search_entry.get().strip()
-        self._populate_tree(search_term)
+        self._populate_tree(search_term)  # ✅ Passes search_term
+        self.search_timer = None
     
     # ===== SELECTED PANEL MANAGEMENT =====
     
@@ -1077,37 +1040,6 @@ class SalesforceExporterApp(ctk.CTk):
         self._refresh_selected_panel()
     
     # ===== ACTION BUTTONS =====
-    
-    def _add_selected_to_export(self):
-        """Add button handler - shows info about selections"""
-        if not self.selected_items:
-            messagebox.showinfo(
-                "Selection Info", 
-                "Select folders or reports from the left panel by checking the checkboxes.\n\n"
-                "✓ Check a folder to select all reports in it\n"
-                "✓ Check individual reports to select them\n\n"
-                "Selected items will automatically appear in the right panel."
-            )
-        else:
-            messagebox.showinfo(
-                "Selection Info", 
-                f"✓ {len(self.selected_items)} report(s) are selected and ready to export.\n\n"
-                "Click 'Export Reports' button at the bottom to start the export."
-            )
-    
-    def _remove_selected_from_export(self):
-        """Remove button handler - clear all selections"""
-        if not self.selected_items:
-            messagebox.showinfo("No Selection", "No reports are currently selected.")
-            return
-        
-        result = messagebox.askyesno(
-            "Remove All",
-            f"Remove all {len(self.selected_items)} selected report(s)?"
-        )
-        
-        if result:
-            self._clear_all_selected()
     
     def _clear_all_selected(self):
         """Clear all selected items"""
