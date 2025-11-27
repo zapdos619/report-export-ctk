@@ -5,6 +5,8 @@ import customtkinter as ctk
 import threading
 import queue
 import os
+import subprocess
+import platform
 import datetime
 import time
 from login_window import LoginWindow
@@ -2334,6 +2336,9 @@ class SalesforceExporterApp(ctk.CTkToplevel):
     
     def _on_export_complete(self, result: Dict):
         """Handle export completion (including cancellation)"""
+        import subprocess
+        import platform
+        
         self.is_exporting = False
         self._set_export_ui_state(True)
         
@@ -2344,14 +2349,13 @@ class SalesforceExporterApp(ctk.CTkToplevel):
         was_cancelled = result.get("cancelled", False)
         completed = result.get("completed", len(successful))
         
-        # Hide cancel button, show export button
         # Hide cancel button, show export button properly
         self.cancel_button.grid_remove()
         self.cancel_button.configure(state="disabled")
-        self.cancel_button.lower()  # ✅ NEW: Push cancel button to back
+        self.cancel_button.lower()
         
         self.export_button.grid()
-        self.export_button.lift()  # ✅ NEW: Bring export button to front
+        self.export_button.lift()
         
         # Update button state based on conditions
         self._update_export_button_state()
@@ -2418,7 +2422,6 @@ class SalesforceExporterApp(ctk.CTkToplevel):
             if len(failed) > 5:
                 self._log(f"  ... and {len(failed) - 5} more (see summary file)")
         
-        # Show completion message
         # Show completion message with statistics
         elapsed = self.progress_tracker.get_elapsed_seconds()
         elapsed_formatted = self.progress_tracker.format_time(elapsed)
@@ -2445,7 +2448,6 @@ class SalesforceExporterApp(ctk.CTkToplevel):
             
             if keep_result is False:  # User chose "No" - delete
                 try:
-                    import os
                     os.remove(zip_path)
                     self._log(f"🗑️ Partial export deleted")
                     messagebox.showinfo("Deleted", "Partial export has been deleted.")
@@ -2474,16 +2476,19 @@ class SalesforceExporterApp(ctk.CTkToplevel):
         # Ask if user wants to open folder
         result = messagebox.askyesno("Open Folder?", "Would you like to open the folder containing the exported file?")
         if result:
-            import subprocess
-            import platform
-            
             folder = os.path.dirname(zip_path)
-            if platform.system() == "Windows":
-                os.startfile(folder)
-            elif platform.system() == "Darwin":  # macOS
-                subprocess.Popen(["open", folder])
-            else:  # Linux
-                subprocess.Popen(["xdg-open", folder])
+            
+            # ✅ FIX: Safer platform-specific folder opening
+            try:
+                if platform.system() == "Windows":
+                    os.startfile(folder)
+                elif platform.system() == "Darwin":  # macOS
+                    subprocess.Popen(["open", folder])
+                else:  # Linux
+                    subprocess.Popen(["xdg-open", folder])
+            except Exception as e:
+                self._log(f"❌ Could not open folder: {str(e)}")
+                messagebox.showerror("Error", f"Could not open folder:\n{str(e)}")
     
     def _on_export_error(self, error_msg: str):
         """Handle export error with helpful messages"""
