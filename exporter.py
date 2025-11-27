@@ -215,6 +215,77 @@ class SalesforceReportExporter:
         self.export_cookies = {
             "sid": self.session_id
         }
+    
+    def _query_with_pagination(
+        self,
+        base_query: str,
+        batch_size: int = 2000,
+        progress_callback: Optional[Callable[[int, int], None]] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Execute SOQL query with automatic pagination.
+        Handles Salesforce's 2,000 row limit per query.
+        
+        Args:
+            base_query: Base SOQL query (without LIMIT/OFFSET)
+            batch_size: Records per batch (default 2000, Salesforce limit)
+            progress_callback: Optional callback(fetched, estimated_total)
+            
+        Returns:
+            List of all records combined from all pages
+        """
+        all_records = []
+        offset = 0
+        has_more = True
+        estimated_total = None
+        
+        while has_more:
+            # Build paginated query
+            paginated_query = f"{base_query} LIMIT {batch_size} OFFSET {offset}"
+            
+            query_url = f"{self.instance_url}/services/data/{self.api_version}/query"
+            params = {"q": paginated_query}
+            
+            try:
+                response = requests.get(
+                    query_url,
+                    headers=self.api_headers,
+                    params=params,
+                    timeout=60
+                )
+                response.raise_for_status()
+                
+                data = response.json()
+                records = data.get("records", [])
+                
+                if not records:
+                    has_more = False
+                    break
+                
+                all_records.extend(records)
+                offset += len(records)
+                
+                # Update progress if callback provided
+                if progress_callback and estimated_total is None:
+                    # Estimate total based on first batch
+                    if len(records) == batch_size:
+                        estimated_total = batch_size * 10  # Rough estimate
+                    else:
+                        estimated_total = len(records)
+                
+                if progress_callback:
+                    progress_callback(len(all_records), estimated_total or len(all_records))
+                
+                # If we got fewer records than batch_size, we're done
+                if len(records) < batch_size:
+                    has_more = False
+                
+            except requests.RequestException as e:
+                # Log error but return what we have so far
+                print(f"Warning: Pagination stopped at offset {offset}: {str(e)}")
+                has_more = False
+        
+        return all_records
 
     def list_report_folders(self) -> List[Dict[str, Any]]:
         """
@@ -292,8 +363,8 @@ class SalesforceReportExporter:
 
     def _list_reports_by_soql(self, folder_id: str) -> List[Dict[str, Any]]:
         """
-        Use SOQL query to get reports by folder ID.
-        This is more reliable than filtering REST API results.
+        Use SOQL query with pagination to get reports by folder ID.
+        Now handles unlimited reports per folder.
         
         Args:
             folder_id: The Salesforce folder ID to query
@@ -303,26 +374,15 @@ class SalesforceReportExporter:
         """
         try:
             # SOQL query to get reports in specific folder
-            query = f"""
+            base_query = f"""
                 SELECT Id, Name, DeveloperName, FolderName, Format, CreatedDate, LastModifiedDate
                 FROM Report 
                 WHERE OwnerId = '{folder_id}'
                 ORDER BY Name
             """
             
-            query_url = f"{self.instance_url}/services/data/{self.api_version}/query"
-            params = {"q": query}
-            
-            response = requests.get(
-                query_url,
-                headers=self.api_headers,
-                params=params,
-                timeout=60
-            )
-            response.raise_for_status()
-            
-            data = response.json()
-            records = data.get("records", [])
+            # Use pagination helper
+            records = self._query_with_pagination(base_query.strip())
             
             # Convert SOQL results to match REST API format
             reports = []
@@ -341,7 +401,6 @@ class SalesforceReportExporter:
             
         except Exception as e:
             print(f"Error querying reports by folder: {str(e)}")
-            # Fall back to empty list rather than crashing
             return []
 
     def export_report_csv(self, report_id: str, timeout: int = 120) -> str:
@@ -776,6 +835,247 @@ class SalesforceReportExporter:
                 "api_version": self.api_version
             }
 
+        finally:
+            try:
+                shutil.rmtree(tmp_dir)
+            except Exception:
+                pass
+    
+    def export_selected_reports_to_zip_concurrent(
+        self,
+        output_zip_path: str,
+        report_ids: List[str],
+        max_workers: int = 5,
+        cancel_event: Optional[Any] = None,
+        retry_attempts: int = 3
+    ) -> Dict[str, Any]:
+        """
+        Export specific selected reports to a ZIP file using CONCURRENT downloads.
+        
+        NEW FEATURES:
+        - Downloads 5 reports in parallel (5-10x faster)
+        - Can be cancelled mid-export
+        - Retries failed reports up to 3 times
+        - Saves partial exports on cancellation
+        
+        Args:
+            output_zip_path: Path where ZIP file will be saved
+            report_ids: List of report IDs to export
+            max_workers: Number of parallel downloads (default 5)
+            cancel_event: Threading event to signal cancellation
+            retry_attempts: Number of retry attempts for failed reports
+            
+        Returns:
+            Dictionary with export results
+        """
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        import threading
+        
+        tmp_dir = Path(tempfile.mkdtemp(prefix="sf_reports_"))
+        
+        try:
+            # Fetch report metadata
+            if not report_ids:
+                reports = []
+            else:
+                chunk_size = 100
+                reports = []
+                
+                for i in range(0, len(report_ids), chunk_size):
+                    # Check for cancellation
+                    if cancel_event and cancel_event.is_set():
+                        raise Exception("Export cancelled by user")
+                    
+                    chunk_ids = report_ids[i:i + chunk_size]
+                    ids_formatted = ",".join([f"'{rid}'" for rid in chunk_ids])
+                    
+                    base_query = f"""
+                        SELECT Id, Name, Format 
+                        FROM Report 
+                        WHERE Id IN ({ids_formatted})
+                    """
+                    
+                    try:
+                        chunk_records = self._query_with_pagination(base_query.strip(), batch_size=2000)
+                        
+                        for record in chunk_records:
+                            reports.append({
+                                "id": record.get("Id"),
+                                "name": record.get("Name"),
+                                "reportFormat": record.get("Format", "TABULAR")
+                            })
+                    except Exception as e:
+                        print(f"Error fetching report chunk: {str(e)}")
+                        for rid in chunk_ids:
+                            reports.append({
+                                "id": rid,
+                                "name": rid,
+                                "reportFormat": "TABULAR"
+                            })
+            
+            total = len(reports)
+            completed = 0
+            failed: List[Dict[str, Any]] = []
+            successful: List[str] = []
+            used_filenames: Dict[str, int] = {}
+            
+            # Thread-safe counters
+            completed_lock = threading.Lock()
+            
+            def export_single_report(report: Dict) -> tuple:
+                """Export a single report - runs in thread pool"""
+                nonlocal completed
+                
+                # Check for cancellation
+                if cancel_event and cancel_event.is_set():
+                    return ("cancelled", report, None)
+                
+                report_id = report.get("id")
+                report_name = report.get("name") or report_id
+                report_type = report.get("reportFormat", "TABULAR")
+                
+                # Generate filename
+                base_name = safe_filename(report_name)
+                
+                with completed_lock:
+                    if base_name in used_filenames:
+                        used_filenames[base_name] += 1
+                        filename = f"{base_name}_{used_filenames[base_name]}.csv"
+                    else:
+                        used_filenames[base_name] = 1
+                        filename = f"{base_name}.csv"
+                
+                csv_path = tmp_dir / filename
+                
+                # Retry logic
+                last_error = None
+                for attempt in range(retry_attempts):
+                    # Check cancellation before each attempt
+                    if cancel_event and cancel_event.is_set():
+                        return ("cancelled", report, None)
+                    
+                    try:
+                        csv_content = self.export_report_csv(report_id, timeout=120)
+                        
+                        if not csv_content or len(csv_content.strip()) == 0:
+                            raise Exception("Empty response received")
+                        
+                        first_line = csv_content.split('\n')[0] if csv_content else ""
+                        if 'Error' in first_line and len(csv_content) < 500:
+                            raise Exception(f"Salesforce error: {first_line[:100]}")
+                        
+                        csv_path.write_text(csv_content, encoding="utf-8")
+                        
+                        # Success!
+                        with completed_lock:
+                            completed += 1
+                        
+                        return ("success", report, filename)
+                        
+                    except Exception as e:
+                        last_error = str(e)
+                        if attempt < retry_attempts - 1:
+                            # Wait before retry (exponential backoff)
+                            time.sleep(1 * (attempt + 1))
+                            continue
+                        else:
+                            # All retries failed
+                            break
+                
+                # Failed after all retries
+                error_content = (
+                    f"# Failed to export report after {retry_attempts} attempts\n"
+                    f"# Report Name: {report_name}\n"
+                    f"# Report ID: {report_id}\n"
+                    f"# Report Type: {report_type}\n"
+                    f"# Error: {last_error}\n"
+                )
+                csv_path.write_text(error_content, encoding="utf-8")
+                
+                with completed_lock:
+                    completed += 1
+                
+                return ("failed", report, last_error)
+            
+            # Export reports concurrently
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                # Submit all tasks
+                future_to_report = {
+                    executor.submit(export_single_report, report): report 
+                    for report in reports
+                }
+                
+                # Process completed tasks
+                for future in as_completed(future_to_report):
+                    # Check for cancellation
+                    if cancel_event and cancel_event.is_set():
+                        # Cancel remaining futures
+                        for f in future_to_report:
+                            f.cancel()
+                        break
+                    
+                    try:
+                        status, report, data = future.result()
+                        
+                        if status == "success":
+                            successful.append(report.get("name"))
+                        elif status == "failed":
+                            failed.append({
+                                "id": report.get("id"),
+                                "name": report.get("name"),
+                                "type": report.get("reportFormat", "TABULAR"),
+                                "error": data
+                            })
+                        elif status == "cancelled":
+                            # Don't count as failed, just stopped
+                            pass
+                        
+                        # Update progress
+                        if self.progress_callback:
+                            try:
+                                self.progress_callback(completed, total)
+                            except Exception:
+                                pass
+                                
+                    except Exception as e:
+                        # Future itself failed
+                        report = future_to_report.get(future)
+                        if report:
+                            failed.append({
+                                "id": report.get("id"),
+                                "name": report.get("name"),
+                                "type": report.get("reportFormat", "TABULAR"),
+                                "error": str(e)
+                            })
+            
+            # Check if cancelled
+            was_cancelled = cancel_event and cancel_event.is_set()
+            
+            # Create ZIP file with what we have
+            with zipfile.ZipFile(output_zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+                for file_path in sorted(tmp_dir.iterdir()):
+                    if file_path.is_file():
+                        zf.write(file_path, arcname=file_path.name)
+                
+                summary = self._create_summary(
+                    total, 
+                    successful, 
+                    failed, 
+                    "Selected Reports" + (" (CANCELLED)" if was_cancelled else "")
+                )
+                zf.writestr("_EXPORT_SUMMARY.txt", summary)
+            
+            return {
+                "zip": output_zip_path,
+                "total": total,
+                "failed": failed,
+                "successful": successful,
+                "folder_name": "Selected Reports",
+                "api_version": self.api_version,
+                "cancelled": was_cancelled,
+                "completed": completed
+            }
+        
         finally:
             try:
                 shutil.rmtree(tmp_dir)

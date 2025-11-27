@@ -6,11 +6,241 @@ import threading
 import queue
 import os
 import datetime
+import time
 from tkinter import filedialog, messagebox, ttk
 from typing import Optional, List, Dict, Any
 from login_window import LoginWindow
 from exporter import SalesforceReportExporter
 
+class VirtualTreeView:
+    """
+    Virtual scrolling tree view for handling 10,000+ items.
+    Only renders visible items to prevent UI freezing.
+    """
+    
+    def __init__(
+        self,
+        parent_frame: ctk.CTkScrollableFrame,
+        item_height: int = 40,
+        visible_items: int = 15
+    ):
+        self.parent_frame = parent_frame
+        self.item_height = item_height
+        self.visible_items = visible_items
+        
+        # Data storage
+        self.all_items = []  # List of all folder items
+        self.visible_widgets = {}  # Currently rendered widgets
+        self.expanded_folders = set()  # Track expanded folder IDs
+        
+        # Scroll tracking
+        self.last_scroll_pos = 0
+        self.render_buffer = 5  # Extra items to render above/below view
+        
+        # Setup scroll monitoring
+        self.parent_frame.bind("<Configure>", self._on_scroll)
+        
+    def set_items(self, items: List[Dict]):
+        """Set all items to be displayed"""
+        self.all_items = items
+        self._render_visible_items()
+    
+    def _on_scroll(self, event=None):
+        """Handle scroll event - render visible items"""
+        # Get current scroll position
+        try:
+            # For CTkScrollableFrame, we need to check the canvas
+            canvas = self.parent_frame._parent_canvas
+            scroll_pos = canvas.yview()[0]
+            
+            # Only re-render if scroll changed significantly
+            if abs(scroll_pos - self.last_scroll_pos) > 0.05:
+                self.last_scroll_pos = scroll_pos
+                self._render_visible_items()
+        except:
+            pass
+    
+    def _render_visible_items(self):
+        """Render only the visible items in the viewport"""
+        if not self.all_items:
+            return
+        
+        # Calculate visible range
+        try:
+            canvas = self.parent_frame._parent_canvas
+            canvas_height = canvas.winfo_height()
+            scroll_y = canvas.yview()[0]
+            
+            total_height = len(self.all_items) * self.item_height
+            visible_start_y = scroll_y * total_height
+            visible_end_y = visible_start_y + canvas_height
+            
+            # Calculate item indices
+            start_idx = max(0, int(visible_start_y / self.item_height) - self.render_buffer)
+            end_idx = min(len(self.all_items), int(visible_end_y / self.item_height) + self.render_buffer + 1)
+            
+        except:
+            # Fallback: render first visible_items
+            start_idx = 0
+            end_idx = min(len(self.all_items), self.visible_items + self.render_buffer)
+        
+        # Track which widgets should exist
+        should_exist = set(range(start_idx, end_idx))
+        current_exist = set(self.visible_widgets.keys())
+        
+        # Remove widgets that are out of view
+        to_remove = current_exist - should_exist
+        for idx in to_remove:
+            if idx in self.visible_widgets:
+                widget = self.visible_widgets[idx]
+                widget.destroy()
+                del self.visible_widgets[idx]
+        
+        # Create widgets that should be visible but don't exist
+        to_create = should_exist - current_exist
+        for idx in sorted(to_create):
+            if idx < len(self.all_items):
+                self._create_item_widget(idx)
+    
+    def _create_item_widget(self, idx: int):
+        """Create widget for item at index - Override in parent class"""
+        pass
+    
+    def toggle_folder(self, folder_id: str):
+        """Toggle folder expansion state"""
+        if folder_id in self.expanded_folders:
+            self.expanded_folders.remove(folder_id)
+        else:
+            self.expanded_folders.add(folder_id)
+    
+    def is_expanded(self, folder_id: str) -> bool:
+        """Check if folder is expanded"""
+        return folder_id in self.expanded_folders
+    
+    def clear(self):
+        """Clear all items and widgets"""
+        for widget in self.visible_widgets.values():
+            try:
+                widget.destroy()
+            except:
+                pass
+        
+        self.visible_widgets.clear()
+        self.all_items.clear()
+        self.expanded_folders.clear()
+        self.last_scroll_pos = 0
+
+
+class ExportProgressTracker:
+    """
+    Track export progress with ETA and speed calculation.
+    """
+    
+    def __init__(self):
+        self.start_time = None
+        self.completed = 0
+        self.total = 0
+        self.last_update_time = None
+        self.last_completed = 0
+        self.speed_samples = []  # Rolling average of speed
+        self.max_samples = 10
+    
+    def start(self, total: int):
+        """Start tracking progress"""
+        self.start_time = time.time()
+        self.last_update_time = self.start_time
+        self.completed = 0
+        self.total = total
+        self.last_completed = 0
+        self.speed_samples = []
+    
+    def update(self, completed: int):
+        """Update progress"""
+        current_time = time.time()
+        
+        if self.last_update_time:
+            time_delta = current_time - self.last_update_time
+            if time_delta > 0:
+                # Calculate instant speed
+                items_delta = completed - self.last_completed
+                instant_speed = items_delta / time_delta
+                
+                # Add to rolling average
+                self.speed_samples.append(instant_speed)
+                if len(self.speed_samples) > self.max_samples:
+                    self.speed_samples.pop(0)
+        
+        self.completed = completed
+        self.last_update_time = current_time
+        self.last_completed = completed
+    
+    def get_speed(self) -> float:
+        """Get current speed (reports/second)"""
+        if not self.speed_samples:
+            return 0.0
+        return sum(self.speed_samples) / len(self.speed_samples)
+    
+    def get_eta_seconds(self) -> float:
+        """Get estimated time remaining in seconds"""
+        speed = self.get_speed()
+        if speed <= 0:
+            return 0.0
+        
+        remaining = self.total - self.completed
+        return remaining / speed
+    
+    def get_elapsed_seconds(self) -> float:
+        """Get elapsed time in seconds"""
+        if not self.start_time:
+            return 0.0
+        return time.time() - self.start_time
+    
+    def format_time(self, seconds: float) -> str:
+        """Format seconds into human-readable time"""
+        if seconds < 60:
+            return f"{int(seconds)}s"
+        elif seconds < 3600:
+            minutes = int(seconds / 60)
+            secs = int(seconds % 60)
+            return f"{minutes}m {secs}s"
+        else:
+            hours = int(seconds / 3600)
+            minutes = int((seconds % 3600) / 60)
+            return f"{hours}h {minutes}m"
+    
+    def get_progress_text(self) -> str:
+        """Get formatted progress text with ETA and speed"""
+        if self.total == 0:
+            return "Ready to export"
+        
+        percentage = int((self.completed / self.total) * 100)
+        speed = self.get_speed()
+        eta_seconds = self.get_eta_seconds()
+        
+        text = f"Exporting: {self.completed}/{self.total} reports ({percentage}%)"
+        
+        if speed > 0:
+            text += f" • {speed:.1f} reports/sec"
+        
+        if eta_seconds > 0 and self.completed < self.total:
+            eta_formatted = self.format_time(eta_seconds)
+            text += f" • ETA: {eta_formatted}"
+        
+        return text
+    
+    def get_completion_text(self) -> str:
+        """Get formatted completion text with statistics"""
+        elapsed = self.get_elapsed_seconds()
+        elapsed_formatted = self.format_time(elapsed)
+        
+        avg_speed = self.completed / elapsed if elapsed > 0 else 0
+        
+        text = f"✅ Completed {self.completed}/{self.total} reports in {elapsed_formatted}"
+        
+        if avg_speed > 0:
+            text += f" (avg: {avg_speed:.1f} reports/sec)"
+        
+        return text
 
 class SalesforceExporterApp(ctk.CTk):
     """
@@ -21,7 +251,7 @@ class SalesforceExporterApp(ctk.CTk):
     def __init__(self):
         super().__init__()
         
-        # Window setup - CHANGED: 1400x900 -> 1200x800
+        # Window setup
         self.title("Salesforce Report Exporter")
         self.geometry("1200x800")
         
@@ -29,6 +259,14 @@ class SalesforceExporterApp(ctk.CTk):
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("blue")
         
+        # ===== NEW: Thread Safety =====
+        self.data_lock = threading.RLock()  # Protects shared data
+        self.ui_lock = threading.RLock()    # Protects UI updates
+        self.export_cancel_event = threading.Event()  # For cancellation
+        
+        # ===== NEW: UI State Management =====
+        self.ui_state = "idle"  # idle, loading, exporting
+        self.pending_ui_operations = []
         
         # Session data
         self.session_info: Optional[Dict] = None
@@ -40,6 +278,7 @@ class SalesforceExporterApp(ctk.CTk):
         # Selection tracking
         self.selected_items: Dict[str, Dict] = {}
         self.is_exporting: bool = False
+        self.is_loading: bool = False  # NEW
         self.search_timer = None 
         
         # Queue for thread-safe UI updates
@@ -48,13 +287,38 @@ class SalesforceExporterApp(ctk.CTk):
         # Setup UI
         self._setup_ui()
         
-        # Center window on screen - ADDED
+        # Center window on screen
         self.after(100, self._center_window)
         
         # Start queue processor
         self._process_queue()
+        
+        # ===== NEW: Bind window close event =====
+        self.protocol("WM_DELETE_WINDOW", self._on_closing)
+        
+        # ===== NEW: Keyboard shortcuts =====
+        self.bind('<Control-l>', lambda e: self._open_login_window())  # Ctrl+L to login
+        self.bind('<Control-e>', lambda e: self._start_export() if not self._is_ui_busy() else None)  # Ctrl+E to export
+        self.bind('<Escape>', lambda e: self._cancel_export() if self.is_exporting else None)  # ESC to cancel
     
-    # ADD THIS NEW METHOD anywhere in your class
+    def _setup_ui(self):
+        """Setup the main UI layout"""
+        
+        # Configure grid layout (3 rows)
+        self.grid_columnconfigure(0, weight=1)
+        self.grid_rowconfigure(0, weight=0)  # Header (fixed height)
+        self.grid_rowconfigure(1, weight=1)  # Main content (expandable)
+        self.grid_rowconfigure(2, weight=0)  # Bottom section (fixed height)
+        
+        # Header
+        self._create_header()
+        
+        # Main content area (3-panel layout)
+        self._create_main_content()
+        
+        # Bottom section (file naming, progress, export button, log)
+        self._create_bottom_section()
+        
     def _center_window(self):
         """Center the main window on screen"""
         # Force window to update and calculate its actual size
@@ -75,71 +339,138 @@ class SalesforceExporterApp(ctk.CTk):
         # Apply the centered geometry
         self.geometry(f'{width}x{height}+{x}+{y}')
     
-    def _setup_ui(self):
-        """Setup the main UI layout"""
+    # ===== NEW: UI STATE MANAGEMENT METHODS =====
+    
+    def _set_ui_state(self, state: str):
+        """
+        Set UI state and update UI accordingly.
+        States: 'idle', 'loading', 'exporting'
+        """
+        with self.ui_lock:
+            self.ui_state = state
+            
+            if state == "idle":
+                self.is_loading = False
+                self.is_exporting = False
+                
+            elif state == "loading":
+                self.is_loading = True
+                self.is_exporting = False
+                
+            elif state == "exporting":
+                self.is_loading = False
+                self.is_exporting = True
+    
+    def _is_ui_busy(self) -> bool:
+        """Check if UI is currently busy with an operation"""
+        with self.ui_lock:
+            return self.ui_state != "idle"
+    
+    def _safe_ui_update(self, callback, *args, **kwargs):
+        """
+        Execute UI update safely on main thread.
+        Prevents race conditions and ensures thread safety.
+        """
+        def wrapper():
+            with self.ui_lock:
+                try:
+                    callback(*args, **kwargs)
+                except Exception as e:
+                    self._log(f"⚠️ UI update error: {str(e)}")
         
-        # Configure grid layout (3 rows)
-        self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure(0, weight=0)  # Header (fixed height)
-        self.grid_rowconfigure(1, weight=1)  # Main content (expandable)
-        self.grid_rowconfigure(2, weight=0)  # Bottom section (fixed height)
+        # If we're on main thread, execute immediately
+        try:
+            if threading.current_thread() is threading.main_thread():
+                wrapper()
+            else:
+                # Schedule on main thread
+                self.after(0, wrapper)
+        except:
+            # Fallback: use queue
+            self.update_queue.put(("ui_update", (callback, args, kwargs)))
+    
+    def _prevent_double_click(self, button: ctk.CTkButton, duration: float = 2.0):
+        """
+        Disable button temporarily to prevent double-clicks.
+        Re-enables after duration seconds.
+        """
+        button.configure(state="disabled")
         
-        # Header
-        self._create_header()
+        def re_enable():
+            try:
+                button.configure(state="normal")
+            except:
+                pass  # Button might be destroyed
         
-        # Main content area (3-panel layout)
-        self._create_main_content()
-        
-        # Bottom section (file naming, progress, export button, log)
-        self._create_bottom_section()
+        self.after(int(duration * 1000), re_enable)
+    
+    def _on_closing(self):
+        """Handle window close event - cancel any ongoing operations"""
+        if self._is_ui_busy():
+            result = messagebox.askyesno(
+                "Operation in Progress",
+                "An operation is in progress. Are you sure you want to exit?\n\n"
+                "This will cancel the current operation.",
+                icon='warning'
+            )
+            
+            if not result:
+                return
+            
+            # Cancel ongoing operations
+            self.export_cancel_event.set()
+            self._log("🛑 Cancelling operations...")
+            
+            # Give threads time to cleanup
+            self.after(500, self.destroy)
+        else:
+            self.destroy()
         
     def _create_header(self):
         """Create header section with title and login status"""
-        # CHANGED: height=80 -> height=60
-        header_frame = ctk.CTkFrame(self, height=60, corner_radius=0)
+        header_frame = ctk.CTkFrame(self, height=80, corner_radius=0)
         header_frame.grid(row=0, column=0, sticky="ew", padx=0, pady=0)
         header_frame.grid_propagate(False)
         
         # Left side - Title
         left_frame = ctk.CTkFrame(header_frame, fg_color="transparent")
-        left_frame.pack(side="left", fill="both", expand=True, padx=15, pady=8)
+        left_frame.pack(side="left", fill="both", expand=True, padx=20, pady=10)
         
         title_label = ctk.CTkLabel(
             left_frame,
             text="📊 Salesforce Report Exporter",
-            font=ctk.CTkFont(size=18, weight="bold")  # CHANGED: 22 -> 18
+            font=ctk.CTkFont(size=22, weight="bold")
         )
         title_label.pack(anchor="w")
         
-        subtitle_label = ctk.CTkLabel(
+        self.subtitle_label = ctk.CTkLabel(
             left_frame,
-            text="Select folders and reports to export",
-            font=ctk.CTkFont(size=11),  # CHANGED: 12 -> 11
+            text="Select folders and reports to export • Ctrl+E to export • ESC to cancel",
+            font=ctk.CTkFont(size=11),
             text_color="gray"
         )
-        subtitle_label.pack(anchor="w", pady=(3, 0))  # CHANGED: 5 -> 3
+        self.subtitle_label.pack(anchor="w", pady=(3, 0))
         
         # Right side - Login status and button
         right_frame = ctk.CTkFrame(header_frame, fg_color="transparent")
-        right_frame.pack(side="right", padx=15, pady=8)
+        right_frame.pack(side="right", padx=20, pady=10)
         
         self.status_label = ctk.CTkLabel(
             right_frame,
             text="🔴 Not logged in",
-            font=ctk.CTkFont(size=11),  # CHANGED: 12 -> 11
+            font=ctk.CTkFont(size=12),
             text_color="gray"
         )
-        self.status_label.pack(pady=(0, 4))  # CHANGED: 5 -> 4
+        self.status_label.pack(pady=(0, 5))
         
         self.login_button = ctk.CTkButton(
             right_frame,
             text="Login to Salesforce",
             command=self._open_login_window,
-            width=140,  # CHANGED: 150 -> 140
-            height=28   # CHANGED: 32 -> 28
+            width=150,
+            height=32
         )
         self.login_button.pack()
-
     
     def _create_main_content(self):
         """Create main content area with 3 panels: Available | Actions | Selected"""
@@ -161,50 +492,50 @@ class SalesforceExporterApp(ctk.CTk):
         """Create left panel - Available folders and reports"""
         
         left_panel = ctk.CTkFrame(parent)
-        left_panel.grid(row=0, column=0, sticky="nsew", padx=(8, 4), pady=8)  # CHANGED: padx
-        left_panel.grid_rowconfigure(3, weight=1)  # CHANGED: row 2 -> 3
+        left_panel.grid(row=0, column=0, sticky="nsew", padx=(10, 5), pady=10)
+        left_panel.grid_rowconfigure(2, weight=1)
         left_panel.grid_columnconfigure(0, weight=1)
         
         # Header
         header_label = ctk.CTkLabel(
             left_panel,
             text="Available Items",
-            font=ctk.CTkFont(size=14, weight="bold")  # CHANGED: 16 -> 14
+            font=ctk.CTkFont(size=16, weight="bold")
         )
-        header_label.grid(row=0, column=0, sticky="w", padx=12, pady=(12, 8))  # CHANGED: padx, pady
+        header_label.grid(row=0, column=0, sticky="w", padx=15, pady=(15, 10))
         
         # "All Folders" button
         self.all_folders_btn = ctk.CTkButton(
             left_panel,
             text="📁 All Folders",
             command=self._load_all_folders,
-            height=32,  # CHANGED: 35 -> 32
+            height=35,
             fg_color="#1f6aa5",
             hover_color="#144870",
             state="disabled"
         )
-        self.all_folders_btn.grid(row=1, column=0, sticky="ew", padx=12, pady=(0, 8))  # CHANGED: padx, pady
+        self.all_folders_btn.grid(row=1, column=0, sticky="ew", padx=15, pady=(0, 10))
         
         # Search box
         search_frame = ctk.CTkFrame(left_panel, fg_color="transparent")
-        search_frame.grid(row=2, column=0, sticky="ew", padx=12, pady=(0, 8))  # CHANGED: padx, pady
+        search_frame.grid(row=2, column=0, sticky="ew", padx=15, pady=(0, 10))
         search_frame.grid_columnconfigure(0, weight=1)
         
         self.left_search_entry = ctk.CTkEntry(
             search_frame,
             placeholder_text="🔍 Search folders and reports...",
-            height=28  # CHANGED: 32 -> 28
+            height=32
         )
         self.left_search_entry.grid(row=0, column=0, sticky="ew")
         self.left_search_entry.bind("<KeyRelease>", self._on_left_search)
         
-        # Tree view container
+        # Tree view container (using CTkScrollableFrame)
         self.tree_container = ctk.CTkScrollableFrame(
             left_panel,
             fg_color="#2b2b2b",
             corner_radius=5
         )
-        self.tree_container.grid(row=3, column=0, sticky="nsew", padx=12, pady=(0, 12))  # CHANGED: padx, pady
+        self.tree_container.grid(row=3, column=0, sticky="nsew", padx=15, pady=(0, 15))
         self.tree_container.grid_columnconfigure(0, weight=1)
         
         # Placeholder
@@ -212,19 +543,26 @@ class SalesforceExporterApp(ctk.CTk):
             self.tree_container,
             text="Please login to load folders and reports",
             text_color="gray",
-            font=ctk.CTkFont(size=11)  # CHANGED: 12 -> 11
+            font=ctk.CTkFont(size=11)
         )
         self.tree_placeholder.grid(row=0, column=0, pady=20)
         
         # Store reference to tree items
         self.tree_items: Dict[str, Dict] = {}
+        
+        # Initialize virtual tree view
+        self.virtual_tree = VirtualTreeView(
+            parent_frame=self.tree_container,
+            item_height=45,  # Height per folder item
+            visible_items=12  # Approximate visible folders
+        )
     
     
     def _create_right_panel(self, parent):
         """Create right panel - Selected items for export"""
         
         right_panel = ctk.CTkFrame(parent)
-        right_panel.grid(row=0, column=1, sticky="nsew", padx=(4, 8), pady=8)  # CHANGED: padx
+        right_panel.grid(row=0, column=1, sticky="nsew", padx=(5, 10), pady=10) 
         right_panel.grid_rowconfigure(2, weight=1)
         right_panel.grid_columnconfigure(0, weight=1)
         
@@ -232,26 +570,26 @@ class SalesforceExporterApp(ctk.CTk):
         header_label = ctk.CTkLabel(
             right_panel,
             text="Selected for Export",
-            font=ctk.CTkFont(size=14, weight="bold")  # CHANGED: 16 -> 14
+            font=ctk.CTkFont(size=16, weight="bold")
         )
-        header_label.grid(row=0, column=0, sticky="w", padx=12, pady=(12, 8))  # CHANGED: padx, pady
+        header_label.grid(row=0, column=0, sticky="w", padx=15, pady=(15, 10))
         
         # Selection count
         self.selection_count_label = ctk.CTkLabel(
             right_panel,
             text="0 reports selected",
-            font=ctk.CTkFont(size=11),  # CHANGED: 12 -> 11
+            font=ctk.CTkFont(size=12),
             text_color="gray"
         )
-        self.selection_count_label.grid(row=1, column=0, sticky="w", padx=12, pady=(0, 8))  # CHANGED: padx, pady
+        self.selection_count_label.grid(row=1, column=0, sticky="w", padx=15, pady=(0, 10))
         
-        # Selected items list
+        # Selected items list (scrollable)
         self.selected_container = ctk.CTkScrollableFrame(
             right_panel,
             fg_color="#2b2b2b",
             corner_radius=5
         )
-        self.selected_container.grid(row=2, column=0, sticky="nsew", padx=12, pady=(0, 12))  # CHANGED: padx, pady
+        self.selected_container.grid(row=2, column=0, sticky="nsew", padx=15, pady=(0, 15))
         self.selected_container.grid_columnconfigure(0, weight=1)
         
         # Placeholder
@@ -259,35 +597,34 @@ class SalesforceExporterApp(ctk.CTk):
             self.selected_container,
             text="No reports selected.\nSelect folders or reports from the left panel.",
             text_color="gray",
-            font=ctk.CTkFont(size=11),  # CHANGED: 12 -> 11
+            font=ctk.CTkFont(size=12),
             justify="center"
         )
-        self.selected_placeholder.grid(row=0, column=0, pady=20)
+        self.selected_placeholder.grid(row=0, column=0, pady=30)
         
         # Actions section
         actions_frame = ctk.CTkFrame(right_panel, fg_color="transparent")
-        actions_frame.grid(row=3, column=0, sticky="ew", padx=12, pady=(0, 12))  # CHANGED: padx, pady
+        actions_frame.grid(row=3, column=0, sticky="ew", padx=15, pady=(0, 15))
         actions_frame.grid_columnconfigure(0, weight=1)
         
         actions_label = ctk.CTkLabel(
             actions_frame,
             text="Actions",
-            font=ctk.CTkFont(size=12, weight="bold")  # CHANGED: 13 -> 12
+            font=ctk.CTkFont(size=13, weight="bold")
         )
-        actions_label.grid(row=0, column=0, sticky="w", pady=(0, 4))  # CHANGED: 5 -> 4
+        actions_label.grid(row=0, column=0, sticky="w", pady=(0, 5))
         
-        # Clear all button
+        # Quick remove all button
         self.clear_selected_button = ctk.CTkButton(
             actions_frame,
             text="Clear All Selected",
             command=self._clear_all_selected,
-            height=32,  # CHANGED: 35 -> 32
+            height=35,
             fg_color="#d32f2f",
             hover_color="#9a2222",
             state="disabled"
         )
-        self.clear_selected_button.grid(row=1, column=0, sticky="ew", pady=(0, 4))  # CHANGED: 5 -> 4
-        
+        self.clear_selected_button.grid(row=1, column=0, sticky="ew", pady=(0, 5))
     
     def _create_bottom_section(self):
         """Create bottom section with file naming, progress, export button, and log"""
@@ -298,97 +635,114 @@ class SalesforceExporterApp(ctk.CTk):
         
         # File naming section
         file_frame = ctk.CTkFrame(bottom_frame)
-        file_frame.grid(row=0, column=0, sticky="ew", padx=8, pady=(8, 4))  # CHANGED: padx, pady
+        file_frame.grid(row=0, column=0, sticky="ew", padx=10, pady=(10, 5))
         file_frame.grid_columnconfigure(1, weight=1)
         
+        # ZIP Filename label
         zip_label = ctk.CTkLabel(
             file_frame,
             text="ZIP Filename:",
-            font=ctk.CTkFont(size=11, weight="bold"),  # CHANGED: 12 -> 11
-            width=110  # CHANGED: 120 -> 110
+            font=ctk.CTkFont(size=12, weight="bold"),
+            width=120
         )
-        zip_label.grid(row=0, column=0, padx=(12, 8), pady=8, sticky="w")  # CHANGED: padx
+        zip_label.grid(row=0, column=0, padx=(15, 10), pady=10, sticky="w")
         
+        # Filename entry
         self.filename_entry = ctk.CTkEntry(
             file_frame,
             placeholder_text="salesforce_reports_20251126_0026.zip",
-            height=30  # CHANGED: 35 -> 30
+            height=35
         )
-        self.filename_entry.grid(row=0, column=1, sticky="ew", padx=(0, 8), pady=8)
+        self.filename_entry.grid(row=0, column=1, sticky="ew", padx=(0, 10), pady=10)
         
+        # Auto-generate timestamp filename
         self._generate_default_filename()
         
         # Save location section
         location_frame = ctk.CTkFrame(bottom_frame)
-        location_frame.grid(row=1, column=0, sticky="ew", padx=8, pady=(0, 4))  # CHANGED: padx, pady
+        location_frame.grid(row=1, column=0, sticky="ew", padx=10, pady=(0, 5))
         location_frame.grid_columnconfigure(1, weight=1)
         
         location_label = ctk.CTkLabel(
             location_frame,
             text="Save Location:",
-            font=ctk.CTkFont(size=11, weight="bold"),  # CHANGED: 12 -> 11
-            width=110  # CHANGED: 120 -> 110
+            font=ctk.CTkFont(size=12, weight="bold"),
+            width=120
         )
-        location_label.grid(row=0, column=0, padx=(12, 8), pady=8, sticky="w")  # CHANGED: padx
+        location_label.grid(row=0, column=0, padx=(15, 10), pady=10, sticky="w")
         
         self.location_entry = ctk.CTkEntry(
             location_frame,
             placeholder_text="Click Browse to select save location...",
-            height=30,  # CHANGED: 35 -> 30
+            height=35,
             state="readonly"
         )
-        self.location_entry.grid(row=0, column=1, sticky="ew", padx=(0, 8), pady=8)
+        self.location_entry.grid(row=0, column=1, sticky="ew", padx=(0, 10), pady=10)
         
         self.browse_button = ctk.CTkButton(
             location_frame,
             text="Browse...",
             command=self._browse_save_location,
-            width=90,  # CHANGED: 100 -> 90
-            height=30  # CHANGED: 35 -> 30
+            width=100,
+            height=35
         )
-        self.browse_button.grid(row=0, column=2, padx=(0, 12), pady=8)  # CHANGED: padx
+        self.browse_button.grid(row=0, column=2, padx=(0, 15), pady=10)
         
         # Export button
         self.export_button = ctk.CTkButton(
             bottom_frame,
             text="🚀 Export Reports",
             command=self._start_export,
-            height=38,  # CHANGED: 45 -> 38
-            font=ctk.CTkFont(size=14, weight="bold"),  # CHANGED: 15 -> 14
+            height=45,
+            font=ctk.CTkFont(size=15, weight="bold"),
             fg_color="#1f6aa5",
             hover_color="#144870",
             state="disabled"
         )
-        self.export_button.grid(row=2, column=0, sticky="ew", padx=8, pady=(0, 4))  # CHANGED: padx, pady
+        self.export_button.grid(row=2, column=0, sticky="ew", padx=10, pady=(0, 5))
+        
+        # Cancel button (hidden by default)
+        self.cancel_button = ctk.CTkButton(
+            bottom_frame,
+            text="🛑 Cancel Export",
+            command=self._cancel_export,
+            height=38,
+            font=ctk.CTkFont(size=14, weight="bold"),
+            fg_color="#d32f2f",
+            hover_color="#9a2222",
+            state="disabled"
+        )
+        self.cancel_button.grid(row=2, column=0, sticky="ew", padx=8, pady=(0, 4))
+        self.cancel_button.grid_remove()  # Hide initially
         
         # Progress bar
-        self.progress_bar = ctk.CTkProgressBar(bottom_frame, height=16)  # CHANGED: 20 -> 16
-        self.progress_bar.grid(row=3, column=0, sticky="ew", padx=8, pady=(0, 4))  # CHANGED: padx, pady
+        self.progress_bar = ctk.CTkProgressBar(bottom_frame, height=20)
+        self.progress_bar.grid(row=3, column=0, sticky="ew", padx=10, pady=(0, 5))
         self.progress_bar.set(0)
         
         # Progress label
         self.progress_label = ctk.CTkLabel(
             bottom_frame,
             text="Ready to export",
-            font=ctk.CTkFont(size=10),  # CHANGED: 11 -> 10
+            font=ctk.CTkFont(size=11),
             text_color="gray"
         )
-        self.progress_label.grid(row=4, column=0, sticky="w", padx=12, pady=(0, 4))  # CHANGED: padx, pady
+        self.progress_label.grid(row=4, column=0, sticky="w", padx=15, pady=(0, 5))
         
-        # Activity Log section - REDUCED HEIGHT
-        log_frame = ctk.CTkFrame(bottom_frame, height=120)  # CHANGED: 150 -> 120
-        log_frame.grid(row=5, column=0, sticky="ew", padx=8, pady=(4, 8))  # CHANGED: padx, pady
+        # Activity Log section
+        log_frame = ctk.CTkFrame(bottom_frame, height=150)
+        log_frame.grid(row=5, column=0, sticky="ew", padx=10, pady=(5, 10))
         log_frame.grid_propagate(False)
         log_frame.grid_rowconfigure(1, weight=1)
         log_frame.grid_columnconfigure(0, weight=1)
         
         log_header_frame = ctk.CTkFrame(log_frame, fg_color="transparent")
-        log_header_frame.grid(row=0, column=0, sticky="ew", padx=8, pady=(8, 4))  # CHANGED: padx, pady
+        log_header_frame.grid(row=0, column=0, sticky="ew", padx=10, pady=(10, 5))
         
         log_header_label = ctk.CTkLabel(
             log_header_frame,
             text="📋 Activity Log",
-            font=ctk.CTkFont(size=12, weight="bold")  # CHANGED: 13 -> 12
+            font=ctk.CTkFont(size=13, weight="bold")
         )
         log_header_label.pack(side="left")
         
@@ -396,9 +750,9 @@ class SalesforceExporterApp(ctk.CTk):
             log_header_frame,
             text="Clear Log",
             command=self._clear_log,
-            width=70,  # CHANGED: 80 -> 70
-            height=22,  # CHANGED: 25 -> 22
-            font=ctk.CTkFont(size=10)  # CHANGED: 11 -> 10
+            width=80,
+            height=25,
+            font=ctk.CTkFont(size=11)
         )
         clear_log_btn.pack(side="right")
         
@@ -406,10 +760,10 @@ class SalesforceExporterApp(ctk.CTk):
         self.log_textbox = ctk.CTkTextbox(
             log_frame,
             wrap="word",
-            font=ctk.CTkFont(family="Consolas", size=9),  # CHANGED: 10 -> 9
+            font=ctk.CTkFont(family="Consolas", size=10),
             fg_color="#1a1a1a"
         )
-        self.log_textbox.grid(row=1, column=0, sticky="nsew", padx=8, pady=(0, 8))  # CHANGED: padx
+        self.log_textbox.grid(row=1, column=0, sticky="nsew", padx=10, pady=(0, 10))
         self.log_textbox.configure(state="disabled")
     
     def _generate_default_filename(self):
@@ -441,13 +795,21 @@ class SalesforceExporterApp(ctk.CTk):
     # ===== LOGIN OPERATIONS =====
     
     def _open_login_window(self):
-        """Open login window"""
+        """Open login window - with double-click protection"""
+        
+        # Prevent opening multiple login windows
+        if self._is_ui_busy():
+            self._log("⚠️ Please wait for current operation to complete")
+            return
+        
         login_win = LoginWindow(self, self._on_login_success)
         self.wait_window(login_win)
     
     def _on_login_success(self, session_info: dict):
-        """Handle successful login"""
-        self.session_info = session_info
+        """Handle successful login - with thread-safe state management"""
+        
+        with self.data_lock:
+            self.session_info = session_info
         
         # Update status
         instance = session_info.get("instance_url", "")
@@ -462,7 +824,7 @@ class SalesforceExporterApp(ctk.CTk):
         self.status_label.configure(text=status_text, text_color="green")
         self.login_button.configure(text="Logout", command=self._logout)
         
-        # Enable buttons - ADD THESE LINES
+        # Enable buttons
         self.all_folders_btn.configure(state="normal")
         
         # Log success
@@ -471,24 +833,41 @@ class SalesforceExporterApp(ctk.CTk):
         if user_name:
             self._log(f"👤 User: {user_name}")
         
-        # Auto-load folders and reports
+        # Auto-load folders and reports (in background)
         self._log("🔄 Loading report folders and reports...")
         self._load_all_folders()
     
     def _logout(self):
-        """Logout and clear session"""
-        self.session_info = None
-        self.available_folders = []
-        self.available_reports = []
-        self.reports_by_folder = {}
-        self.selected_items.clear()
-        self.tree_items.clear()
+        """Logout and clear session - with thread safety"""
+        
+        # Check if busy
+        if self._is_ui_busy():
+            result = messagebox.askyesno(
+                "Operation in Progress",
+                "An operation is in progress. Cancel and logout?",
+                icon='warning'
+            )
+            if not result:
+                return
+            
+            # Cancel operations
+            self.export_cancel_event.set()
+            self.after(500, self._logout)  # Retry after cancellation
+            return
+        
+        with self.data_lock:
+            self.session_info = None
+            self.available_folders = []
+            self.available_reports = []
+            self.reports_by_folder = {}
+            self.selected_items.clear()
+            self.tree_items.clear()
         
         # Reset UI
         self.status_label.configure(text="🔴 Not logged in", text_color="gray")
         self.login_button.configure(text="Login to Salesforce", command=self._open_login_window)
         
-        # Disable buttons (ONLY the ones that exist)
+        # Disable buttons
         self.all_folders_btn.configure(state="disabled")
         self.export_button.configure(state="disabled")
         self.clear_selected_button.configure(state="disabled")
@@ -505,7 +884,7 @@ class SalesforceExporterApp(ctk.CTk):
         )
         self.tree_placeholder.grid(row=0, column=0, pady=20)
         
-        # Clear selected panel completely
+        # Clear selected panel
         for widget in self.selected_container.winfo_children():
             widget.destroy()
         
@@ -534,14 +913,25 @@ class SalesforceExporterApp(ctk.CTk):
         # Reset filename
         self._generate_default_filename()
         
+        # Reset state
+        self._set_ui_state("idle")
+        
         self._log("🔴 Logged out")
     
     # ===== LOAD FOLDERS AND REPORTS =====
     
     def _load_all_folders(self):
-        """Load all folders and reports in background"""
+        """Load all folders and reports in background with progress"""
         if not self.session_info:
             return
+        
+        # Check if already loading
+        if self.is_loading:
+            self._log("⚠️ Already loading data, please wait...")
+            return
+        
+        # Set state
+        self._set_ui_state("loading")
         
         # Disable button and show loading
         self.all_folders_btn.configure(state="disabled", text="⏳ Loading...")
@@ -550,13 +940,29 @@ class SalesforceExporterApp(ctk.CTk):
         for widget in self.tree_container.winfo_children():
             widget.destroy()
         
+        # Create loading frame with progress
+        loading_frame = ctk.CTkFrame(self.tree_container, fg_color="transparent")
+        loading_frame.grid(row=0, column=0, pady=30)
+        
         loading_label = ctk.CTkLabel(
-            self.tree_container,
-            text="⏳ Loading folders and reports...\nThis may take a moment.",
+            loading_frame,
+            text="⏳ Loading folders and reports...",
             text_color="gray",
-            font=ctk.CTkFont(size=12)
+            font=ctk.CTkFont(size=12, weight="bold")
         )
-        loading_label.grid(row=0, column=0, pady=30)
+        loading_label.pack(pady=(0, 10))
+        
+        self.loading_progress_label = ctk.CTkLabel(
+            loading_frame,
+            text="Connecting to Salesforce...",
+            text_color="gray",
+            font=ctk.CTkFont(size=11)
+        )
+        self.loading_progress_label.pack(pady=(0, 10))
+        
+        self.loading_progress_bar = ctk.CTkProgressBar(loading_frame, width=300)
+        self.loading_progress_bar.pack()
+        self.loading_progress_bar.set(0)
         
         self._log("🔄 Fetching folders and reports from Salesforce...")
         
@@ -564,7 +970,7 @@ class SalesforceExporterApp(ctk.CTk):
         thread.start()
     
     def _load_data_worker(self):
-        """Background worker to load folders and reports"""
+        """Background worker to load folders and reports with progress"""
         try:
             session_id = self.session_info.get("session_id")
             instance_url = self.session_info.get("instance_url")
@@ -572,30 +978,44 @@ class SalesforceExporterApp(ctk.CTk):
             exporter = SalesforceReportExporter(session_id, instance_url)
             
             # Step 1: Load folders
+            self.update_queue.put(("loading_progress", (0.1, "Fetching folders...")))
             folders = exporter.list_report_folders()
-            self.update_queue.put(("log", f"Loaded {len(folders)} folders"))
+            self.update_queue.put(("log", f"📁 Found {len(folders)} folders"))
             
-            # Step 2: Load ALL reports (not filtered by folder)
+            # Step 2: Load ALL reports (for total count)
+            self.update_queue.put(("loading_progress", (0.2, "Fetching all reports...")))
             all_reports = exporter.list_reports()
-            self.update_queue.put(("log", f"Loaded {len(all_reports)} total reports"))
+            self.update_queue.put(("log", f"📄 Found {len(all_reports)} total reports"))
             
-            # Step 3: For each folder, get reports in that folder using SOQL
+            # Step 3: For each folder, get reports with progress
+            self.update_queue.put(("loading_progress", (0.3, "Loading reports by folder...")))
+            
             reports_by_folder_id = {}
+            total_folders = len(folders)
             
-            for folder in folders:
+            for idx, folder in enumerate(folders):
                 folder_id = folder.get("id")
                 folder_name = folder.get("name")
                 
                 try:
-                    # Query reports specifically for this folder
+                    # Update progress
+                    progress = 0.3 + (0.6 * (idx / max(total_folders, 1)))
+                    status = f"Loading folder {idx + 1}/{total_folders}: {folder_name[:30]}..."
+                    self.update_queue.put(("loading_progress", (progress, status)))
+                    
+                    # Query reports for this folder (with pagination)
                     folder_reports = exporter.list_reports(folder_id=folder_id)
                     reports_by_folder_id[folder_id] = folder_reports
                     
                     if folder_reports:
-                        self.update_queue.put(("log", f"  Folder '{folder_name}': {len(folder_reports)} reports"))
+                        self.update_queue.put(("log", f"  ✓ {folder_name}: {len(folder_reports)} reports"))
+                    
                 except Exception as e:
-                    self.update_queue.put(("log", f"  Error loading reports for '{folder_name}': {str(e)}"))
+                    self.update_queue.put(("log", f"  ✗ Error loading '{folder_name}': {str(e)}"))
                     reports_by_folder_id[folder_id] = []
+            
+            # Final progress
+            self.update_queue.put(("loading_progress", (0.9, "Preparing tree view...")))
             
             # Update UI via queue
             self.update_queue.put(("data_loaded", {
@@ -607,14 +1027,29 @@ class SalesforceExporterApp(ctk.CTk):
         except Exception as e:
             import traceback
             error_details = traceback.format_exc()
-            self.update_queue.put(("log", f"ERROR: {error_details}"))
+            self.update_queue.put(("log", f"❌ ERROR: {error_details}"))
             self.update_queue.put(("data_error", str(e)))
     
+    def _on_loading_progress(self, progress_data):
+        """Update loading progress in tree panel"""
+        progress_value, status_text = progress_data
+        
+        try:
+            if hasattr(self, 'loading_progress_bar'):
+                self.loading_progress_bar.set(progress_value)
+            
+            if hasattr(self, 'loading_progress_label'):
+                self.loading_progress_label.configure(text=status_text)
+        except:
+            pass  # Widgets might be destroyed
+    
     def _on_data_loaded(self, data: Dict):
-        """Handle data loaded successfully"""
-        self.available_folders = data.get("folders", [])
-        self.available_reports = data.get("reports", [])
-        self.reports_by_folder = data.get("reports_by_folder", {})
+        """Handle data loaded successfully - with chunked tree population"""
+        
+        with self.data_lock:
+            self.available_folders = data.get("folders", [])
+            self.available_reports = data.get("reports", [])
+            self.reports_by_folder = data.get("reports_by_folder", {})
         
         # Filter out system folders
         filtered_folders = [
@@ -623,7 +1058,8 @@ class SalesforceExporterApp(ctk.CTk):
             and not f.get("name").startswith("__")
         ]
         
-        self.available_folders = filtered_folders
+        with self.data_lock:
+            self.available_folders = filtered_folders
         
         # Count total reports
         total_reports_in_folders = sum(len(reports) for reports in self.reports_by_folder.values())
@@ -632,18 +1068,38 @@ class SalesforceExporterApp(ctk.CTk):
         for widget in self.tree_container.winfo_children():
             widget.destroy()
         
-        # Populate tree
-        self._populate_tree()
+        # Show temporary message
+        temp_label = ctk.CTkLabel(
+            self.tree_container,
+            text=f"📊 Rendering {len(filtered_folders)} folders with {total_reports_in_folders} reports...\nPlease wait...",
+            text_color="gray",
+            font=ctk.CTkFont(size=11)
+        )
+        temp_label.grid(row=0, column=0, pady=20)
+        
+        # Populate tree in chunks (non-blocking)
+        self._populate_tree_chunked()
         
         # Re-enable button
         self.all_folders_btn.configure(state="normal", text="📁 All Folders")
         
-        # Log results
-        self._log(f"✅ Loaded {len(filtered_folders)} folders")
-        self._log(f"✅ Found {total_reports_in_folders} reports across all folders")
+        # Reset state
+        self._set_ui_state("idle")
+        
+        # Log results with statistics
+        self._log("=" * 50)
+        self._log(f"✅ DATA LOADING COMPLETE")
+        self._log(f"📁 Folders Loaded: {len(filtered_folders)}")
+        self._log(f"📄 Total Reports: {total_reports_in_folders}")
+        
+        if total_reports_in_folders > 0:
+            avg_reports_per_folder = total_reports_in_folders / len(filtered_folders) if len(filtered_folders) > 0 else 0
+            self._log(f"📊 Average Reports/Folder: {avg_reports_per_folder:.1f}")
         
         if total_reports_in_folders == 0:
-            self._log("⚠️ No reports found. Check folder permissions.")
+            self._log("⚠️ WARNING: No reports found. Check folder permissions.")
+        
+        self._log("=" * 50)
         
     def _on_data_error(self, error: str):
         """Handle data loading error"""
@@ -733,6 +1189,219 @@ class SalesforceExporterApp(ctk.CTk):
                 folder_data["folder"], 
                 folder_data["reports"]
             )
+            
+    def _populate_tree_chunked(self, search_term: str = ""):
+        """
+        Populate tree using virtual scrolling for instant rendering.
+        Now handles unlimited folders/reports without UI freezing.
+        """
+        
+        # Clear existing tree
+        for widget in self.tree_container.winfo_children():
+            widget.destroy()
+        
+        self.tree_items.clear()
+        
+        if self.virtual_tree:
+            self.virtual_tree.clear()
+        
+        if not self.available_folders:
+            placeholder = ctk.CTkLabel(
+                self.tree_container,
+                text="No folders found",
+                text_color="gray",
+                font=ctk.CTkFont(size=12)
+            )
+            placeholder.grid(row=0, column=0, pady=30)
+            return
+        
+        # Prepare filtered data
+        filtered_folders_data = []
+        
+        with self.data_lock:
+            if search_term:
+                search_lower = search_term.lower()
+                
+                for folder in self.available_folders:
+                    folder_id = folder.get("id")
+                    folder_name = folder.get("name", "")
+                    
+                    all_reports = self.reports_by_folder.get(folder_id, [])
+                    
+                    folder_matches = search_lower in folder_name.lower()
+                    
+                    if folder_matches:
+                        filtered_folders_data.append({
+                            "folder": folder,
+                            "reports": all_reports
+                        })
+                    else:
+                        matching_reports = [
+                            r for r in all_reports
+                            if search_lower in r.get("name", "").lower()
+                        ]
+                        
+                        if matching_reports:
+                            filtered_folders_data.append({
+                                "folder": folder,
+                                "reports": matching_reports
+                            })
+            else:
+                for folder in self.available_folders:
+                    folder_id = folder.get("id")
+                    filtered_folders_data.append({
+                        "folder": folder,
+                        "reports": self.reports_by_folder.get(folder_id, [])
+                    })
+        
+        if not filtered_folders_data and search_term:
+            placeholder = ctk.CTkLabel(
+                self.tree_container,
+                text=f"No results found for '{search_term}'",
+                text_color="gray",
+                font=ctk.CTkFont(size=12)
+            )
+            placeholder.grid(row=0, column=0, pady=30)
+            return
+        
+        # Store data in tree_items for reference
+        for idx, folder_data in enumerate(filtered_folders_data):
+            folder = folder_data["folder"]
+            folder_id = folder.get("id")
+            reports = folder_data["reports"]
+            
+            self.tree_items[folder_id] = {
+                "folder": folder,
+                "folder_name": folder.get("name", "Unknown"),
+                "reports": reports,
+                "expanded": False,
+                "row_index": idx,
+                "checkbox_var": None,  # Will be created on-demand
+                "report_checkboxes": {}
+            }
+        
+        # Use virtual rendering with chunking for smooth experience
+        total_folders = len(filtered_folders_data)
+        chunk_size = 50  # Create 50 folders at a time
+        
+        def render_chunk(start_idx):
+            end_idx = min(start_idx + chunk_size, total_folders)
+            
+            for i in range(start_idx, end_idx):
+                folder_data = filtered_folders_data[i]
+                self._create_folder_item_virtual(i, folder_data["folder"], folder_data["reports"])
+            
+            if end_idx < total_folders:
+                progress_pct = int((end_idx / total_folders) * 100)
+                self._log(f"🔄 Building tree: {end_idx}/{total_folders} ({progress_pct}%)")
+                self.after(5, lambda: render_chunk(end_idx))
+            else:
+                self._log(f"✅ Tree ready: {total_folders} folders")
+        
+        if total_folders > chunk_size:
+            self._log(f"🔄 Building tree structure ({total_folders} folders)...")
+        
+        render_chunk(0)
+        
+    def _populate_tree_chunked(self, search_term: str = ""):
+        """
+        Populate tree in chunks to prevent UI freezing.
+        Renders 20 folders at a time with small delays.
+        """
+        
+        # Clear existing tree
+        for widget in self.tree_container.winfo_children():
+            widget.destroy()
+        
+        self.tree_items.clear()
+        
+        if not self.available_folders:
+            placeholder = ctk.CTkLabel(
+                self.tree_container,
+                text="No folders found",
+                text_color="gray",
+                font=ctk.CTkFont(size=12)
+            )
+            placeholder.grid(row=0, column=0, pady=30)
+            return
+        
+        # Filter folders and reports by search term
+        filtered_folders_data = []
+        
+        with self.data_lock:
+            if search_term:
+                search_lower = search_term.lower()
+                
+                for folder in self.available_folders:
+                    folder_id = folder.get("id")
+                    folder_name = folder.get("name", "")
+                    
+                    all_reports = self.reports_by_folder.get(folder_id, [])
+                    
+                    folder_matches = search_lower in folder_name.lower()
+                    
+                    if folder_matches:
+                        filtered_folders_data.append({
+                            "folder": folder,
+                            "reports": all_reports
+                        })
+                    else:
+                        matching_reports = [
+                            r for r in all_reports
+                            if search_lower in r.get("name", "").lower()
+                        ]
+                        
+                        if matching_reports:
+                            filtered_folders_data.append({
+                                "folder": folder,
+                                "reports": matching_reports
+                            })
+            else:
+                for folder in self.available_folders:
+                    folder_id = folder.get("id")
+                    filtered_folders_data.append({
+                        "folder": folder,
+                        "reports": self.reports_by_folder.get(folder_id, [])
+                    })
+        
+        if not filtered_folders_data and search_term:
+            placeholder = ctk.CTkLabel(
+                self.tree_container,
+                text=f"No results found for '{search_term}'",
+                text_color="gray",
+                font=ctk.CTkFont(size=12)
+            )
+            placeholder.grid(row=0, column=0, pady=30)
+            return
+        
+        # Render in chunks
+        chunk_size = 20  # Render 20 folders at a time
+        total_folders = len(filtered_folders_data)
+        
+        def render_chunk(start_idx):
+            end_idx = min(start_idx + chunk_size, total_folders)
+            
+            for i in range(start_idx, end_idx):
+                folder_data = filtered_folders_data[i]
+                # Use row = i * 2 to leave space for reports
+                self._create_folder_item(i, folder_data["folder"], folder_data["reports"])
+            
+            # If more folders to render, schedule next chunk
+            if end_idx < total_folders:
+                # Update progress
+                progress_pct = int((end_idx / total_folders) * 100)
+                self._log(f"🔄 Rendering folders: {end_idx}/{total_folders} ({progress_pct}%)")
+                
+                # Schedule next chunk after 10ms delay
+                self.after(10, lambda: render_chunk(end_idx))
+            else:
+                self._log(f"✅ Tree view ready: {total_folders} folders displayed")
+        
+        # Start rendering first chunk
+        if total_folders > chunk_size:
+            self._log(f"🔄 Rendering tree view in chunks ({chunk_size} folders at a time)...")
+        
+        render_chunk(0)
         
     def _create_folder_item(self, row: int, folder: Dict, reports_to_show: List[Dict]):
         """Create a folder item in the tree"""
@@ -816,6 +1485,87 @@ class SalesforceExporterApp(ctk.CTk):
             )
             no_reports_label.grid(row=0, column=0, padx=20, pady=10)
     
+    def _create_folder_item_virtual(self, row: int, folder: Dict, reports_to_show: List[Dict]):
+        """
+        Create a folder item optimized for virtual scrolling.
+        Only creates checkbox and header, reports loaded on-demand.
+        """
+        
+        folder_id = folder.get("id")
+        folder_name = folder.get("name", "Unnamed Folder")
+        folder_type = folder.get("type", "")
+        reports_in_folder = reports_to_show
+        
+        # Update tree_items with lazy-loaded data
+        if folder_id not in self.tree_items:
+            self.tree_items[folder_id] = {
+                "folder": folder,
+                "folder_name": folder_name,
+                "reports": reports_in_folder,
+                "expanded": False,
+                "row_index": row,
+                "report_checkboxes": {}
+            }
+        
+        # Main folder frame
+        folder_frame = ctk.CTkFrame(self.tree_container, fg_color="#333333", corner_radius=5)
+        folder_frame.grid(row=row * 2, column=0, sticky="ew", padx=5, pady=3)
+        folder_frame.grid_columnconfigure(2, weight=1)
+        
+        # Folder checkbox (lazy create)
+        if self.tree_items[folder_id].get("checkbox_var") is None:
+            self.tree_items[folder_id]["checkbox_var"] = ctk.BooleanVar(value=False)
+        
+        folder_checkbox_var = self.tree_items[folder_id]["checkbox_var"]
+        folder_checkbox = ctk.CTkCheckBox(
+            folder_frame,
+            text="",
+            variable=folder_checkbox_var,
+            width=20,
+            checkbox_width=18,
+            checkbox_height=18,
+            command=lambda: self._on_folder_checkbox_changed(folder_id, folder_checkbox_var)
+        )
+        folder_checkbox.grid(row=0, column=0, padx=(10, 5), pady=10, sticky="w")
+        
+        # Expand/collapse button
+        expand_btn = ctk.CTkButton(
+            folder_frame,
+            text="▶",
+            width=25,
+            height=25,
+            fg_color="transparent",
+            hover_color="#444444",
+            font=ctk.CTkFont(size=12),
+            command=lambda: self._toggle_folder_expansion(folder_id)
+        )
+        expand_btn.grid(row=0, column=1, padx=(0, 5), pady=10, sticky="w")
+        
+        # Folder icon and name
+        icon = "🌐" if folder_type == "Public" else "👤" if "My" in folder_name else "📂"
+        folder_label = ctk.CTkLabel(
+            folder_frame,
+            text=f"{icon} {folder_name} ({len(reports_in_folder)} reports)",
+            font=ctk.CTkFont(size=12),
+            anchor="w"
+        )
+        folder_label.grid(row=0, column=2, sticky="ew", padx=(0, 10), pady=10)
+        
+        # Reports container (created but hidden initially)
+        reports_frame = ctk.CTkFrame(self.tree_container, fg_color="#2b2b2b")
+        reports_frame.grid(row=row * 2 + 1, column=0, sticky="ew", padx=(30, 5), pady=(0, 3))
+        reports_frame.grid_remove()  # Hide initially
+        reports_frame.grid_columnconfigure(0, weight=1)
+        
+        # Update tree_items with widget references
+        self.tree_items[folder_id].update({
+            "frame": folder_frame,
+            "checkbox": folder_checkbox,
+            "expand_btn": expand_btn,
+            "reports_frame": reports_frame,
+            "reports_loaded": False  # Track if reports are rendered
+        })
+    
     def _create_report_items(self, parent_frame, folder_id: str, reports: List[Dict]):
         """Create report checkboxes inside a folder's reports frame"""
         
@@ -860,9 +1610,71 @@ class SalesforceExporterApp(ctk.CTk):
                 "checkbox_var": report_checkbox_var,
                 "name": report_name
             }
+    def _load_reports_for_folder(self, folder_id: str, reports_frame, reports: List[Dict]):
+        """
+        Lazy load report checkboxes for a folder.
+        Only called when user expands the folder.
+        """
+        
+        # Load in chunks for smooth rendering
+        chunk_size = 50
+        total_reports = len(reports)
+        
+        def load_chunk(start_idx):
+            end_idx = min(start_idx + chunk_size, total_reports)
+            
+            for idx in range(start_idx, end_idx):
+                report = reports[idx]
+                report_id = report.get("id")
+                report_name = report.get("name", "Unnamed Report")
+                
+                # Report item frame
+                report_frame = ctk.CTkFrame(reports_frame, fg_color="transparent")
+                report_frame.grid(row=idx, column=0, sticky="ew", padx=10, pady=2)
+                report_frame.grid_columnconfigure(1, weight=1)
+                
+                # Report checkbox
+                report_checkbox_var = ctk.BooleanVar(value=False)
+                report_checkbox = ctk.CTkCheckBox(
+                    report_frame,
+                    text="",
+                    variable=report_checkbox_var,
+                    width=20,
+                    checkbox_width=16,
+                    checkbox_height=16,
+                    command=lambda rid=report_id, rname=report_name, fid=folder_id, var=report_checkbox_var: 
+                        self._on_report_checkbox_changed(rid, rname, fid, var)
+                )
+                report_checkbox.grid(row=0, column=0, padx=(5, 5), pady=5, sticky="w")
+                
+                # Report name
+                report_label = ctk.CTkLabel(
+                    report_frame,
+                    text=f"📄 {report_name}",
+                    font=ctk.CTkFont(size=11),
+                    anchor="w"
+                )
+                report_label.grid(row=0, column=1, sticky="ew", padx=(0, 10), pady=5)
+                
+                # Store report checkbox reference
+                if "report_checkboxes" not in self.tree_items[folder_id]:
+                    self.tree_items[folder_id]["report_checkboxes"] = {}
+                
+                self.tree_items[folder_id]["report_checkboxes"][report_id] = {
+                    "checkbox": report_checkbox,
+                    "checkbox_var": report_checkbox_var,
+                    "name": report_name
+                }
+            
+            # Load next chunk if needed
+            if end_idx < total_reports:
+                self.after(10, lambda: load_chunk(end_idx))
+        
+        # Start loading first chunk
+        load_chunk(0)
     
     def _toggle_folder_expansion(self, folder_id: str):
-        """Toggle folder expansion to show/hide reports"""
+        """Toggle folder expansion with lazy loading of reports"""
         
         if folder_id not in self.tree_items:
             return
@@ -871,6 +1683,8 @@ class SalesforceExporterApp(ctk.CTk):
         reports_frame = tree_item["reports_frame"]
         expand_btn = tree_item["expand_btn"]
         is_expanded = tree_item["expanded"]
+        reports_loaded = tree_item.get("reports_loaded", False)
+        reports = tree_item.get("reports", [])
         
         if is_expanded:
             # Collapse
@@ -879,9 +1693,25 @@ class SalesforceExporterApp(ctk.CTk):
             tree_item["expanded"] = False
         else:
             # Expand
-            reports_frame.grid()
             expand_btn.configure(text="▼")
             tree_item["expanded"] = True
+            
+            # Lazy load reports if not already loaded
+            if not reports_loaded and reports:
+                self._load_reports_for_folder(folder_id, reports_frame, reports)
+                tree_item["reports_loaded"] = True
+            elif not reports:
+                # Show empty message
+                no_reports_label = ctk.CTkLabel(
+                    reports_frame,
+                    text="No reports in this folder",
+                    text_color="gray",
+                    font=ctk.CTkFont(size=11)
+                )
+                no_reports_label.grid(row=0, column=0, padx=20, pady=10)
+                tree_item["reports_loaded"] = True
+            
+            reports_frame.grid()
     
     def _on_folder_checkbox_changed(self, folder_id: str, checkbox_var: ctk.BooleanVar):
         """Handle folder checkbox change - select/deselect all reports in folder"""
@@ -1202,6 +2032,28 @@ class SalesforceExporterApp(ctk.CTk):
     
     # ===== EXPORT OPERATIONS =====
     
+    def _cancel_export(self):
+        """Cancel the ongoing export operation"""
+        
+        if not self.is_exporting:
+            return
+        
+        result = messagebox.askyesno(
+            "Cancel Export",
+            "Cancel the export?\n\n"
+            "You can choose to save the reports that have already been exported.",
+            icon='warning'
+        )
+        
+        if result:
+            self._log("🛑 Cancelling export...")
+            self.export_cancel_event.set()
+            
+            # Update UI
+            self.cancel_button.configure(state="disabled", text="🛑 Cancelling...")
+            self.progress_label.configure(text="Cancelling export...", text_color="orange")
+    
+    
     def _start_export(self):
         """Start the export process"""
         
@@ -1250,6 +2102,17 @@ class SalesforceExporterApp(ctk.CTk):
         # Get list of report IDs
         report_ids = list(self.selected_items.keys())
         
+        # Clear cancel event
+        self.export_cancel_event.clear()
+        
+        # Initialize progress tracker
+        self.progress_tracker.start(len(report_ids))
+        
+        # Show cancel button, hide export button
+        self.export_button.grid_remove()
+        self.cancel_button.grid()
+        self.cancel_button.configure(state="normal", text="🛑 Cancel Export")
+        
         # Start export in background
         thread = threading.Thread(
             target=self._export_worker,
@@ -1259,13 +2122,26 @@ class SalesforceExporterApp(ctk.CTk):
         thread.start()
     
     def _export_worker(self, report_ids: List[str]):
-        """Background worker for export"""
+        """Background worker for export with concurrent downloads"""
         try:
             session_id = self.session_info.get("session_id")
             instance_url = self.session_info.get("instance_url")
             
             def progress_callback(done, total):
-                self.update_queue.put(("progress", (done, total)))
+                # Batch progress updates (every 5 reports or 1 second)
+                if not hasattr(progress_callback, 'last_update'):
+                    progress_callback.last_update = 0
+                    progress_callback.last_time = time.time()
+                
+                current_time = time.time()
+                
+                if (done - progress_callback.last_update >= 5 or 
+                    current_time - progress_callback.last_time >= 1.0 or
+                    done == total):
+                    
+                    self.update_queue.put(("progress", (done, total)))
+                    progress_callback.last_update = done
+                    progress_callback.last_time = current_time
             
             exporter = SalesforceReportExporter(
                 session_id,
@@ -1273,35 +2149,57 @@ class SalesforceExporterApp(ctk.CTk):
                 progress_callback=progress_callback
             )
             
-            result = exporter.export_selected_reports_to_zip(
+            # Use concurrent export method
+            result = exporter.export_selected_reports_to_zip_concurrent(
                 self.output_zip_path,
-                report_ids
+                report_ids,
+                max_workers=5,  # 5 parallel downloads
+                cancel_event=self.export_cancel_event,
+                retry_attempts=3  # Retry 3 times on failure
             )
             
             self.update_queue.put(("export_complete", result))
             
         except Exception as e:
+            import traceback
+            error_details = traceback.format_exc()
+            self.update_queue.put(("log", f"❌ Export error:\n{error_details}"))
             self.update_queue.put(("export_error", str(e)))
     
     def _on_export_progress(self, progress_data):
-        """Handle export progress update"""
+        """Handle export progress update with ETA and speed"""
         done, total = progress_data
+        
+        # Update progress tracker
+        self.progress_tracker.update(done)
         
         if total > 0:
             progress = done / total
             self.progress_bar.set(progress)
             
-            percentage = int(progress * 100)
+            # Get enhanced progress text with ETA and speed
+            progress_text = self.progress_tracker.get_progress_text()
             self.progress_label.configure(
-                text=f"Exporting: {done}/{total} reports ({percentage}%)",
+                text=progress_text,
                 text_color="#1f6aa5"
             )
             
-            if done % 5 == 0 or done == total:  # Log every 5 reports
-                self.update_queue.put(("log", f"📦 Exported {done}/{total} reports"))
+            # Log milestone updates (every 10% or every 50 reports)
+            if done % 50 == 0 or done == total:
+                percentage = int((done / total) * 100)
+                speed = self.progress_tracker.get_speed()
+                
+                if speed > 0:
+                    self.update_queue.put(("log", 
+                        f"📦 Progress: {done}/{total} ({percentage}%) • {speed:.1f} reports/sec"
+                    ))
+                else:
+                    self.update_queue.put(("log", 
+                        f"📦 Progress: {done}/{total} ({percentage}%)"
+                    ))
     
     def _on_export_complete(self, result: Dict):
-        """Handle export completion"""
+        """Handle export completion (including cancellation)"""
         self.is_exporting = False
         self._set_export_ui_state(True)
         
@@ -1309,36 +2207,124 @@ class SalesforceExporterApp(ctk.CTk):
         failed = result.get("failed", [])
         successful = result.get("successful", [])
         zip_path = result.get("zip", "")
+        was_cancelled = result.get("cancelled", False)
+        completed = result.get("completed", len(successful))
         
-        # Update progress
-        self.progress_bar.set(1.0)
-        self.progress_label.configure(
-            text=f"✅ Export completed! {len(successful)}/{total} reports exported",
-            text_color="green"
-        )
+        # Hide cancel button, show export button
+        self.cancel_button.grid_remove()
+        self.export_button.grid()
         
-        # Log summary
-        self._log(f"✅ Export completed!")
-        self._log(f"📊 Total: {total} reports")
-        self._log(f"✔ Successful: {len(successful)}")
-        self._log(f"✗ Failed: {len(failed)}")
+        # Update progress with statistics
+        if was_cancelled:
+            progress_value = completed / total if total > 0 else 0
+            self.progress_bar.set(progress_value)
+            
+            elapsed = self.progress_tracker.get_elapsed_seconds()
+            elapsed_formatted = self.progress_tracker.format_time(elapsed)
+            
+            self.progress_label.configure(
+                text=f"⚠️ Export cancelled after {elapsed_formatted}. Saved {completed}/{total} reports",
+                text_color="orange"
+            )
+        else:
+            self.progress_bar.set(1.0)
+            
+            # Get completion statistics
+            completion_text = self.progress_tracker.get_completion_text()
+            self.progress_label.configure(
+                text=completion_text,
+                text_color="green"
+            )
+        
+        # Log summary with statistics
+        self._log("=" * 50)
+        
+        if was_cancelled:
+            self._log(f"⚠️ EXPORT CANCELLED BY USER")
+            self._log(f"📊 Completed: {completed}/{total} reports")
+        else:
+            self._log(f"✅ EXPORT COMPLETED SUCCESSFULLY")
+            self._log(f"📊 Total: {total} reports")
+        
+        # Export statistics
+        elapsed = self.progress_tracker.get_elapsed_seconds()
+        elapsed_formatted = self.progress_tracker.format_time(elapsed)
+        avg_speed = completed / elapsed if elapsed > 0 else 0
+        
+        self._log(f"⏱️  Duration: {elapsed_formatted}")
+        if avg_speed > 0:
+            self._log(f"⚡ Average Speed: {avg_speed:.2f} reports/sec")
+        
+        self._log(f"✔️  Successful: {len(successful)}")
+        self._log(f"❌ Failed: {len(failed)}")
+        
+        if len(failed) > 0:
+            success_rate = (len(successful) / total * 100) if total > 0 else 0
+            self._log(f"📈 Success Rate: {success_rate:.1f}%")
+        
         self._log(f"💾 Saved to: {zip_path}")
+        self._log("=" * 50)
         
         if failed:
             self._log("⚠️ Failed reports:")
             for f in failed[:5]:
-                self._log(f"  • {f.get('name')}: {f.get('error')[:50]}")
+                error_msg = f.get('error', 'Unknown error')
+                self._log(f"  • {f.get('name')}: {error_msg[:50]}")
             if len(failed) > 5:
                 self._log(f"  ... and {len(failed) - 5} more (see summary file)")
         
         # Show completion message
-        message = f"Export completed!\n\n"
-        message += f"Total: {total} reports\n"
-        message += f"Successful: {len(successful)}\n"
-        message += f"Failed: {len(failed)}\n\n"
-        message += f"ZIP saved to:\n{zip_path}"
+        # Show completion message with statistics
+        elapsed = self.progress_tracker.get_elapsed_seconds()
+        elapsed_formatted = self.progress_tracker.format_time(elapsed)
+        avg_speed = completed / elapsed if elapsed > 0 else 0
         
-        messagebox.showinfo("Export Complete", message)
+        if was_cancelled:
+            # Ask user about partial export
+            message = f"Export was cancelled.\n\n"
+            message += f"📊 Statistics:\n"
+            message += f"  • Completed: {completed}/{total} reports\n"
+            message += f"  • Successful: {len(successful)}\n"
+            message += f"  • Failed: {len(failed)}\n"
+            message += f"  • Duration: {elapsed_formatted}\n"
+            if avg_speed > 0:
+                message += f"  • Average Speed: {avg_speed:.1f} reports/sec\n"
+            message += f"\nPartial export saved to:\n{zip_path}\n\n"
+            message += f"Do you want to keep this partial export?"
+            
+            keep_result = messagebox.askyesnocancel(
+                "Export Cancelled",
+                message,
+                icon='warning'
+            )
+            
+            if keep_result is False:  # User chose "No" - delete
+                try:
+                    import os
+                    os.remove(zip_path)
+                    self._log(f"🗑️ Partial export deleted")
+                    messagebox.showinfo("Deleted", "Partial export has been deleted.")
+                    return
+                except Exception as e:
+                    self._log(f"❌ Failed to delete: {str(e)}")
+            elif keep_result is None:  # User chose "Cancel" - do nothing
+                return
+            # If True, continue to open folder option
+        else:
+            success_rate = (len(successful) / total * 100) if total > 0 else 0
+            
+            message = f"Export completed successfully!\n\n"
+            message += f"📊 Statistics:\n"
+            message += f"  • Total Reports: {total}\n"
+            message += f"  • Successful: {len(successful)}\n"
+            message += f"  • Failed: {len(failed)}\n"
+            message += f"  • Success Rate: {success_rate:.1f}%\n"
+            message += f"  • Duration: {elapsed_formatted}\n"
+            if avg_speed > 0:
+                message += f"  • Average Speed: {avg_speed:.1f} reports/sec\n"
+            message += f"\n💾 ZIP saved to:\n{zip_path}"
+            
+            messagebox.showinfo("Export Complete", message)
         
         # Ask if user wants to open folder
         result = messagebox.askyesno("Open Folder?", "Would you like to open the folder containing the exported file?")
@@ -1355,35 +2341,77 @@ class SalesforceExporterApp(ctk.CTk):
                 subprocess.Popen(["xdg-open", folder])
     
     def _on_export_error(self, error_msg: str):
-        """Handle export error"""
+        """Handle export error with helpful messages"""
         self.is_exporting = False
         self._set_export_ui_state(True)
         
-        self.progress_bar.set(0)
-        self.progress_label.configure(text="❌ Export failed", text_color="red")
+        # Hide cancel button, show export button
+        self.cancel_button.grid_remove()
+        self.export_button.grid()
         
-        self._log(f"❌ Export failed: {error_msg}")
-        messagebox.showerror("Export Failed", f"Export failed:\n\n{error_msg}")
+        self.progress_bar.set(0)
+        
+        # Get elapsed time
+        elapsed = self.progress_tracker.get_elapsed_seconds()
+        elapsed_formatted = self.progress_tracker.format_time(elapsed) if elapsed > 0 else "0s"
+        
+        self.progress_label.configure(
+            text=f"❌ Export failed after {elapsed_formatted}",
+            text_color="red"
+        )
+        
+        self._log("=" * 50)
+        self._log(f"❌ EXPORT FAILED")
+        self._log(f"⏱️  Failed after: {elapsed_formatted}")
+        self._log(f"📊 Error: {error_msg}")
+        self._log("=" * 50)
+        
+        # Provide helpful error message
+        helpful_msg = self._get_helpful_error_message(error_msg)
+        
+        messagebox.showerror(
+            "Export Failed",
+            f"Export failed:\n\n{error_msg}\n\n{helpful_msg}"
+        )
+    
+    def _get_helpful_error_message(self, error_msg: str) -> str:
+        """Get helpful suggestion based on error message"""
+        error_lower = error_msg.lower()
+        
+        if "session" in error_lower or "authentication" in error_lower:
+            return "💡 Suggestion: Your session may have expired. Try logging out and back in."
+        
+        elif "network" in error_lower or "connection" in error_lower or "timeout" in error_lower:
+            return "💡 Suggestion: Check your internet connection and try again."
+        
+        elif "permission" in error_lower or "access" in error_lower:
+            return "💡 Suggestion: You may not have permission to access these reports. Check with your Salesforce admin."
+        
+        elif "limit" in error_lower or "exceeded" in error_lower:
+            return "💡 Suggestion: Salesforce API limits may have been reached. Try exporting fewer reports at once or wait a few minutes."
+        
+        elif "cancelled" in error_lower:
+            return "ℹ️ Export was cancelled by user."
+        
+        else:
+            return "💡 Suggestion: Try exporting fewer reports at once, or check the activity log for more details."
     
     def _set_export_ui_state(self, enabled: bool):
         """Enable/disable UI during export"""
         state = "normal" if enabled else "disabled"
         
-        # Only manage buttons that actually exist
         self.login_button.configure(state=state)
         self.browse_button.configure(state=state)
         self.all_folders_btn.configure(state=state)
-        
-        # Clear Selected button
-        if enabled and len(self.selected_items) > 0:
-            self.clear_selected_button.configure(state="normal")
-        else:
-            self.clear_selected_button.configure(state="disabled")
+        self.filename_entry.configure(state=state)
         
         # Filename entry
         if enabled:
             self.filename_entry.configure(state="normal")
             self._update_export_button_state()
+            # Hide cancel button, show export button
+            self.cancel_button.grid_remove()
+            self.export_button.grid()
         else:
             self.filename_entry.configure(state="disabled")
             self.export_button.configure(state="disabled")
@@ -1402,6 +2430,8 @@ class SalesforceExporterApp(ctk.CTk):
                     
                     if event_type == "data_loaded":
                         self._on_data_loaded(data)
+                    elif event_type == "loading_progress":
+                        self._on_loading_progress(data)
                     elif event_type == "data_error":
                         self._on_data_error(data)
                     elif event_type == "progress":
