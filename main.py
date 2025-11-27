@@ -116,7 +116,7 @@ class AppLauncher:
         
         # Create main app as Toplevel (not standalone)
         self.main_app = SalesforceExporterApp(
-            master=self.root,  # ← NEW: Parent to root
+            master=self.root,
             session_info=self.session_info,
             on_logout=self._on_logout
         )

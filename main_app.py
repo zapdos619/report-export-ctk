@@ -243,7 +243,7 @@ class ExportProgressTracker:
         
         return text
 
-class SalesforceExporterApp(ctk.CTk):
+class SalesforceExporterApp(ctk.CTkToplevel):
     """
     Main application window for Salesforce Report Exporter.
     Redesigned with folder/report tree view and dual-panel selection.
@@ -251,7 +251,7 @@ class SalesforceExporterApp(ctk.CTk):
     
     def __init__(
         self,
-        master,  # ← NEW: Required master parameter
+        master,  # ← Required master parameter
         session_info: Dict,
         on_logout: Optional[Callable] = None
     ):
@@ -2617,14 +2617,12 @@ class SalesforceExporterApp(ctk.CTk):
         # Schedule next check
         self.after(100, self._process_queue)
 
-
-# ===== ENTRY POINT =====
-
-def main():
-    """Main entry point for the application"""
-    app = SalesforceExporterApp()
-    app.mainloop()
-
+# ===== NO STANDALONE ENTRY POINT =====
+# This app is now launched via main.py's AppLauncher
+# Do not run this file directly
 
 if __name__ == "__main__":
-    main()
+    print("⚠️  ERROR: Do not run main_app.py directly!")
+    print("✅ Run main.py instead to start the application properly.")
+    import sys
+    sys.exit(1)
