@@ -1,5 +1,5 @@
-# login_window.py - TRULY RESPONSIVE VERSION
-# All components resize proportionally based on window size
+# login_window.py - FIXED VERSION (Part 1)
+# Login window that appears FIRST when app starts
 
 import customtkinter as ctk
 import threading
@@ -7,26 +7,36 @@ from typing import Optional, Callable
 from salesforce_auth import SalesforceAuth, SalesforceAuthError
 
 
-class LoginWindow(ctk.CTkToplevel):
+class LoginWindow(ctk.CTkToplevel):  # ← CHANGED: Was CTk, now CTkToplevel
     """
-    Fully responsive login window that adapts to ANY monitor.
-    All components scale proportionally with window size.
+    Login window shown as Toplevel.
+    
+    KEY FIX: Now a Toplevel window instead of standalone root window.
+    This allows it to exist within a parent event loop.
     """
     
-    def __init__(self, parent, on_login_success: Callable, *args, **kwargs):
-        super().__init__(parent, *args, **kwargs)
+    def __init__(
+        self, 
+        master,  # ← NEW: Required master parameter
+        on_login_success: Callable,
+        on_login_cancelled: Optional[Callable] = None,
+        *args, 
+        **kwargs
+    ):
+        # ← CHANGED: Pass master to Toplevel
+        super().__init__(master, *args, **kwargs)
         
         self.on_login_success = on_login_success
+        self.on_login_cancelled = on_login_cancelled
         self.session_info = None
         
         # Initial setup
         self.title("Salesforce Login")
         
-        # Make it modal
-        self.transient(parent)
+        # ← NEW: Make this window modal-like (grab focus)
         self.grab_set()
         
-        # Hide initially
+        # Hide initially to calculate size
         self.withdraw()
         self.update_idletasks()
         
@@ -39,6 +49,9 @@ class LoginWindow(ctk.CTkToplevel):
         # Show and center
         self.deiconify()
         self.after(50, self._center_on_current_monitor)
+        
+        # Handle window close event
+        self.protocol("WM_DELETE_WINDOW", self._on_window_close)
     
     def _calculate_responsive_size(self):
         """Calculate responsive window and component sizes"""
@@ -50,59 +63,44 @@ class LoginWindow(ctk.CTkToplevel):
         
         # Determine window size based on screen height
         if screen_height <= 768:
-            # Small screens
             window_height = int(screen_height * 0.75)
             self.compact_mode = True
         elif screen_height <= 900:
-            # Medium screens
             window_height = int(screen_height * 0.70)
             self.compact_mode = True
         elif screen_height <= 1080:
-            # HD screens
             window_height = int(screen_height * 0.62)
             self.compact_mode = False
         else:
-            # Large screens (2K, 4K)
             window_height = int(screen_height * 0.55)
             self.compact_mode = False
         
-        # Width is always proportional
-        window_width = int(window_height * 0.85)  # Aspect ratio
+        window_width = int(window_height * 0.85)
         
-        # Enforce limits
         window_width = max(400, min(window_width, 550))
         window_height = max(500, min(window_height, 650))
         
-        # Store dimensions
         self.window_width = window_width
         self.window_height = window_height
         
-        # Calculate component sizes proportionally
         self._calculate_component_sizes()
         
-        # Apply geometry
         self.geometry(f"{window_width}x{window_height}")
         self.minsize(400, 500)
         self.maxsize(600, 700)
-        
-        print(f"🖥️  Screen: {screen_width}x{screen_height}")
-        print(f"🪟  Login: {window_width}x{window_height}")
     
     def _calculate_component_sizes(self):
         """Calculate all component sizes based on window dimensions"""
         h = self.window_height
         
-        # Proportional sizes based on window height
-        self.header_font_size = max(18, int(h * 0.038))  # ~3.8% of height
-        self.subtitle_font_size = max(10, int(h * 0.019))  # ~1.9% of height
-        self.label_font_size = max(11, int(h * 0.021))  # ~2.1% of height
-        self.input_height = max(30, int(h * 0.058))  # ~5.8% of height
-        self.button_height = max(36, int(h * 0.065))  # ~6.5% of height
-        self.padding_large = max(12, int(h * 0.025))  # ~2.5% of height
-        self.padding_medium = max(8, int(h * 0.015))  # ~1.5% of height
-        self.padding_small = max(5, int(h * 0.010))  # ~1.0% of height
-        
-        print(f"📏 Component sizes calculated for {h}px height")
+        self.header_font_size = max(18, int(h * 0.038))
+        self.subtitle_font_size = max(10, int(h * 0.019))
+        self.label_font_size = max(11, int(h * 0.021))
+        self.input_height = max(30, int(h * 0.058))
+        self.button_height = max(36, int(h * 0.065))
+        self.padding_large = max(12, int(h * 0.025))
+        self.padding_medium = max(8, int(h * 0.015))
+        self.padding_small = max(5, int(h * 0.010))
     
     def _center_on_current_monitor(self):
         """Center window on current monitor"""
@@ -118,10 +116,12 @@ class LoginWindow(ctk.CTkToplevel):
         
         self.geometry(f'{width}x{height}+{x}+{y}')
     
+    # Continue LoginWindow class...
+    
     def _setup_ui(self):
         """Setup UI with proportional sizing"""
         
-        # Main container (NOT scrollable - fits exactly)
+        # Main container
         self.grid_rowconfigure(0, weight=1)
         self.grid_columnconfigure(0, weight=1)
         
@@ -132,17 +132,16 @@ class LoginWindow(ctk.CTkToplevel):
         self.main_frame.grid_columnconfigure(0, weight=1)
         
         # Configure rows with proportional weights
-        total_weight = 100
-        self.main_frame.grid_rowconfigure(0, weight=8)   # Header
-        self.main_frame.grid_rowconfigure(1, weight=5)   # Subtitle
-        self.main_frame.grid_rowconfigure(2, weight=35)  # Environment frame
-        self.main_frame.grid_rowconfigure(3, weight=35)  # Credentials frame
-        self.main_frame.grid_rowconfigure(4, weight=10)  # Login button
-        self.main_frame.grid_rowconfigure(5, weight=7)   # Status
+        self.main_frame.grid_rowconfigure(0, weight=8)
+        self.main_frame.grid_rowconfigure(1, weight=5)
+        self.main_frame.grid_rowconfigure(2, weight=35)
+        self.main_frame.grid_rowconfigure(3, weight=35)
+        self.main_frame.grid_rowconfigure(4, weight=10)
+        self.main_frame.grid_rowconfigure(5, weight=7)
         
         row = 0
         
-        # ===== HEADER =====
+        # HEADER
         self.header_label = ctk.CTkLabel(
             self.main_frame,
             text="🔐 Salesforce Login",
@@ -160,7 +159,7 @@ class LoginWindow(ctk.CTkToplevel):
         self.subtitle_label.grid(row=row, column=0, sticky="ew")
         row += 1
         
-        # ===== ENVIRONMENT FRAME =====
+        # ENVIRONMENT FRAME
         self.env_frame = ctk.CTkFrame(self.main_frame)
         self.env_frame.grid(row=row, column=0, sticky="nsew", pady=(self.padding_medium, 0))
         self.env_frame.grid_columnconfigure(0, weight=1)
@@ -176,7 +175,6 @@ class LoginWindow(ctk.CTkToplevel):
         ).grid(row=0, column=0, padx=self.padding_large, 
                pady=(self.padding_medium, self.padding_small), sticky="w")
         
-        # Environment dropdown
         self.env_var = ctk.StringVar(value="Production")
         self.env_dropdown = ctk.CTkOptionMenu(
             self.env_frame,
@@ -187,7 +185,6 @@ class LoginWindow(ctk.CTkToplevel):
         self.env_dropdown.grid(row=1, column=0, sticky="ew", 
                               padx=self.padding_large, pady=self.padding_small)
         
-        # Custom domain checkbox
         self.custom_domain_var = ctk.BooleanVar(value=False)
         self.custom_domain_check = ctk.CTkCheckBox(
             self.env_frame,
@@ -199,7 +196,6 @@ class LoginWindow(ctk.CTkToplevel):
         self.custom_domain_check.grid(row=2, column=0, padx=self.padding_large, 
                                      pady=self.padding_small, sticky="w")
         
-        # Custom domain entry
         self.custom_domain_entry = ctk.CTkEntry(
             self.env_frame,
             placeholder_text="mycompany.my.salesforce.com",
@@ -210,7 +206,7 @@ class LoginWindow(ctk.CTkToplevel):
                                      padx=self.padding_large, 
                                      pady=(self.padding_small, self.padding_medium))
         
-        # ===== CREDENTIALS FRAME =====
+        # CREDENTIALS FRAME
         self.cred_frame = ctk.CTkFrame(self.main_frame)
         self.cred_frame.grid(row=row, column=0, sticky="nsew", pady=(self.padding_medium, 0))
         self.cred_frame.grid_columnconfigure(0, weight=1)
@@ -227,7 +223,6 @@ class LoginWindow(ctk.CTkToplevel):
         ).grid(row=0, column=0, padx=self.padding_large, 
                pady=(self.padding_medium, self.padding_small), sticky="w")
         
-        # Username
         self.username_entry = ctk.CTkEntry(
             self.cred_frame,
             placeholder_text="your.email@company.com",
@@ -236,7 +231,6 @@ class LoginWindow(ctk.CTkToplevel):
         self.username_entry.grid(row=1, column=0, sticky="ew", 
                                 padx=self.padding_large, pady=self.padding_small)
         
-        # Password
         self.password_entry = ctk.CTkEntry(
             self.cred_frame,
             placeholder_text="Password",
@@ -246,7 +240,6 @@ class LoginWindow(ctk.CTkToplevel):
         self.password_entry.grid(row=2, column=0, sticky="ew", 
                                 padx=self.padding_large, pady=self.padding_small)
         
-        # Security Token
         self.token_entry = ctk.CTkEntry(
             self.cred_frame,
             placeholder_text="Security Token (optional)",
@@ -256,7 +249,6 @@ class LoginWindow(ctk.CTkToplevel):
         self.token_entry.grid(row=3, column=0, sticky="ew", 
                              padx=self.padding_large, pady=self.padding_small)
         
-        # Token info
         ctk.CTkLabel(
             self.cred_frame,
             text="💡 Leave blank if IP whitelisted",
@@ -266,7 +258,7 @@ class LoginWindow(ctk.CTkToplevel):
         ).grid(row=4, column=0, padx=self.padding_large, 
                pady=(self.padding_small, self.padding_medium), sticky="w")
         
-        # ===== LOGIN BUTTON =====
+        # LOGIN BUTTON
         self.login_button = ctk.CTkButton(
             self.main_frame,
             text="Login to Salesforce",
@@ -278,7 +270,7 @@ class LoginWindow(ctk.CTkToplevel):
                               pady=(self.padding_medium, self.padding_small))
         row += 1
         
-        # ===== STATUS LABEL =====
+        # STATUS LABEL
         self.status_label = ctk.CTkLabel(
             self.main_frame,
             text="",
@@ -293,6 +285,8 @@ class LoginWindow(ctk.CTkToplevel):
         self.bind('<Return>', lambda e: self._on_login_click())
         self.username_entry.focus()
     
+    # Continue LoginWindow class...
+    
     def _on_custom_domain_toggle(self):
         """Toggle custom domain entry"""
         if self.custom_domain_var.get():
@@ -303,11 +297,12 @@ class LoginWindow(ctk.CTkToplevel):
             self.env_dropdown.configure(state="normal")
     
     def _on_login_click(self):
-        """Handle login"""
+        """Handle login button click"""
         username = self.username_entry.get().strip()
         password = self.password_entry.get()
         token = self.token_entry.get()
         
+        # Validation
         if not username:
             self._show_status("❌ Please enter username", "red")
             self.username_entry.focus()
@@ -327,9 +322,11 @@ class LoginWindow(ctk.CTkToplevel):
         else:
             domain = "login" if self.env_var.get() == "Production" else "test"
         
+        # Disable UI during login
         self._set_ui_enabled(False)
-        self._show_status("🔄 Connecting...", "gray")
+        self._show_status("🔄 Connecting to Salesforce...", "gray")
         
+        # Start login in background thread
         thread = threading.Thread(
             target=self._login_worker,
             args=(username, password, token, domain),
@@ -338,19 +335,36 @@ class LoginWindow(ctk.CTkToplevel):
         thread.start()
     
     def _login_worker(self, username: str, password: str, token: str, domain: str):
-        """Background login"""
+        """
+        Background worker for login.
+        
+        KEY FIX: Uses self.after() to safely update UI from thread.
+        """
         try:
             auth = SalesforceAuth()
             result = auth.login(username, password, token, domain)
-            self.after(0, self._on_login_success_callback, result)
+            
+            # Schedule UI update on main thread
+            self.after(0, lambda: self._on_login_success_callback(result))
+            
         except SalesforceAuthError as e:
-            self.after(0, self._on_login_error_callback, str(e))
+            # Schedule error UI update on main thread
+            self.after(0, lambda: self._on_login_error_callback(str(e)))
+            
         except Exception as e:
-            self.after(0, self._on_login_error_callback, f"Error: {str(e)}")
+            # Schedule generic error UI update on main thread
+            self.after(0, lambda: self._on_login_error_callback(f"Error: {str(e)}"))
     
     def _on_login_success_callback(self, session_info: dict):
-        """Login success"""
+        """
+        Handle successful login.
+        
+        KEY FIX: No more race conditions or delays before callback.
+        Immediately triggers parent callback which handles window destruction.
+        """
         self.session_info = session_info
+        
+        # Show success message
         instance = session_info.get("instance_url", "").replace('https://', '')
         api_version = session_info.get("api_version", "")
         
@@ -360,29 +374,88 @@ class LoginWindow(ctk.CTkToplevel):
         
         self._show_status(msg, "green")
         
+        # ← KEY FIX: Call parent callback immediately (no delay!)
+        # The parent (AppLauncher) is responsible for destroying this window
         if self.on_login_success:
-            self.on_login_success(session_info)
+            # Small delay just for user to see success message
+            self.after(500, lambda: self._trigger_success_callback())
+    
+    def _trigger_success_callback(self):
+        """
+        Trigger the success callback.
         
-        self.after(1000, self.destroy)
+        KEY FIX: Separated into own method to ensure callback fires
+        even if window is being destroyed.
+        """
+        if self.on_login_success and self.session_info:
+            try:
+                # Release grab before callback (allows parent to take control)
+                self.grab_release()
+                
+                # Call parent callback
+                self.on_login_success(self.session_info)
+                
+                # Note: Parent is responsible for destroying this window
+                # Don't call self.destroy() here!
+                
+            except Exception as e:
+                print(f"⚠️ Error in login success callback: {e}")
     
     def _on_login_error_callback(self, error_msg: str):
-        """Login error"""
+        """
+        Handle login error.
+        
+        KEY FIX: Re-enables UI immediately without delays.
+        """
         self._show_status(f"❌ {error_msg}", "red")
         self._set_ui_enabled(True)
     
     def _show_status(self, message: str, color: str = "gray"):
-        """Update status"""
-        self.status_label.configure(text=message, text_color=color)
+        """Update status label"""
+        try:
+            self.status_label.configure(text=message, text_color=color)
+        except:
+            pass  # Widget might be destroyed
     
     def _set_ui_enabled(self, enabled: bool):
-        """Enable/disable UI"""
+        """Enable/disable UI elements"""
         state = "normal" if enabled else "disabled"
-        self.username_entry.configure(state=state)
-        self.password_entry.configure(state=state)
-        self.token_entry.configure(state=state)
-        self.login_button.configure(state=state)
         
-        if not self.custom_domain_var.get():
-            self.env_dropdown.configure(state=state)
-        if self.custom_domain_var.get():
-            self.custom_domain_entry.configure(state=state)
+        try:
+            self.username_entry.configure(state=state)
+            self.password_entry.configure(state=state)
+            self.token_entry.configure(state=state)
+            self.login_button.configure(state=state)
+            
+            if not self.custom_domain_var.get():
+                self.env_dropdown.configure(state=state)
+            if self.custom_domain_var.get():
+                self.custom_domain_entry.configure(state=state)
+        except:
+            pass  # Widgets might be destroyed
+    
+    def _on_window_close(self):
+        """
+        Handle window close button (X).
+        
+        KEY FIX: Properly releases grab and calls cancellation callback.
+        """
+        # Release grab
+        try:
+            self.grab_release()
+        except:
+            pass
+        
+        # Call cancellation callback if provided
+        if self.on_login_cancelled:
+            try:
+                self.on_login_cancelled()
+            except Exception as e:
+                print(f"⚠️ Error in cancellation callback: {e}")
+        else:
+            # Default: just destroy this window
+            try:
+                self.destroy()
+            except:
+                pass
+    

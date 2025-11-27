@@ -251,14 +251,12 @@ class SalesforceExporterApp(ctk.CTk):
     
     def __init__(
         self,
-        master,  # ← NEW: Required master parameter
         session_info: Dict,
         on_logout: Optional[Callable] = None
     ):
-        # ← CHANGED: Pass master to Toplevel
-        super().__init__(master)
+        super().__init__()
         
-        # Store session info and logout callback
+        # ✅ NEW: Store session info and logout callback
         self.session_info = session_info
         self.on_logout_callback = on_logout
         
@@ -266,23 +264,21 @@ class SalesforceExporterApp(ctk.CTk):
         self.title("Salesforce Report Exporter")
         self.geometry("1200x800")
         
-        # ← NEW: Make this window modal-like (grab focus)
-        self.grab_set()
-        
-        # Set theme (already set in launcher, but doesn't hurt)
+        # Set theme
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("blue")
         
-        # Thread Safety
-        self.data_lock = threading.RLock()
-        self.ui_lock = threading.RLock()
-        self.export_cancel_event = threading.Event()
+        # ===== NEW: Thread Safety =====
+        self.data_lock = threading.RLock()  # Protects shared data
+        self.ui_lock = threading.RLock()    # Protects UI updates
+        self.export_cancel_event = threading.Event()  # For cancellation
         
-        # UI State Management
-        self.ui_state = "idle"
+        # ===== NEW: UI State Management =====
+        self.ui_state = "idle"  # idle, loading, exporting
         self.pending_ui_operations = []
         
         # Session data
+        # self.session_info: Optional[Dict] = None
         self.output_zip_path: Optional[str] = None
         self.available_folders: List[Dict] = []
         self.available_reports: List[Dict] = []
@@ -291,10 +287,10 @@ class SalesforceExporterApp(ctk.CTk):
         # Selection tracking
         self.selected_items: Dict[str, Dict] = {}
         self.is_exporting: bool = False
-        self.is_loading: bool = False
+        self.is_loading: bool = False  # NEW
         self.search_timer = None 
         
-        # Progress tracker
+        # Progress tracker for exports
         self.progress_tracker = ExportProgressTracker()
         
         # Queue for thread-safe UI updates
@@ -309,20 +305,19 @@ class SalesforceExporterApp(ctk.CTk):
         # Start queue processor
         self._process_queue()
         
-        # Bind window close event
+        # ===== NEW: Bind window close event =====
         self.protocol("WM_DELETE_WINDOW", self._on_closing)
         
-        # Keyboard shortcuts
-        self.bind('<Control-e>', lambda e: self._start_export() if not self._is_ui_busy() else None)
-        self.bind('<Escape>', lambda e: self._cancel_export() if self.is_exporting else None)
+        # ===== NEW: Keyboard shortcuts =====
+        self.bind('<Control-e>', lambda e: self._start_export() if not self._is_ui_busy() else None)  # Ctrl+E to export
+        self.bind('<Escape>', lambda e: self._cancel_export() if self.is_exporting else None)  # ESC to cancel
         
-        # Window configuration tracking
+        # ===== NEW: Window move/resize event handler =====
         self.bind('<Configure>', self._on_window_configure)
-        self._last_window_geometry = None
-        self._last_export_state = None
-        self._configure_timer = None
-        
-        # Auto-load data after UI is ready
+        self._last_window_geometry = None  # Track window position changes
+        self._last_export_state = None  # ✅ ADD THIS - Track export state changes
+        self._configure_timer = None  # ✅ ADD THIS - Debounce timer
+        # ✅ NEW: Auto-load data after UI is ready
         self.after(500, self._auto_load_data_on_startup)
         
     def _setup_ui(self):
@@ -429,12 +424,7 @@ class SalesforceExporterApp(ctk.CTk):
         self.after(int(duration * 1000), re_enable)
     
     def _on_closing(self):
-        """
-        Handle window close event.
-        
-        KEY FIX: Calls logout instead of directly destroying.
-        This ensures proper cleanup through the parent.
-        """
+        """Handle window close event - cancel any ongoing operations"""
         if self._is_ui_busy():
             result = messagebox.askyesno(
                 "Operation in Progress",
@@ -450,36 +440,10 @@ class SalesforceExporterApp(ctk.CTk):
             self.export_cancel_event.set()
             self._log("🛑 Cancelling operations...")
             
-            # Give threads time to cleanup, then close
-            self.after(500, self._force_close)
+            # Give threads time to cleanup
+            self.after(500, self.destroy)
         else:
-            # No operations running - can close immediately
-            self._force_close()
-    
-    def _force_close(self):
-        """
-        Force close the window.
-        
-        Called after operations are cancelled or if no operations running.
-        """
-        try:
-            self.grab_release()
-        except:
-            pass
-        
-        # If we have a logout callback, use it (proper flow)
-        if self.on_logout_callback:
-            try:
-                self.on_logout_callback()
-                return
-            except:
-                pass
-        
-        # Fallback: destroy directly
-        try:
             self.destroy()
-        except:
-            pass
     
     def _on_window_configure(self, event=None):
         """
@@ -945,11 +909,7 @@ class SalesforceExporterApp(ctk.CTk):
     # ===== LOGIN OPERATIONS =====
     
     def _logout(self):
-        """
-        Logout and return to login window.
-        
-        KEY FIX: Releases grab and lets parent handle window destruction.
-        """
+        """Logout and return to login window"""
         
         # Check if busy
         if self._is_ui_busy():
@@ -978,30 +938,12 @@ class SalesforceExporterApp(ctk.CTk):
         
         self._log("🔴 Logging out...")
         
-        # ← KEY FIX: Release grab before calling parent callback
-        try:
-            self.grab_release()
-        except:
-            pass
-        
-        # Call parent's logout handler
-        # Parent (AppLauncher) will destroy this window and show login
+        # ✅ NEW: Call the logout callback to return to login window
         if self.on_logout_callback:
-            try:
-                self.on_logout_callback()
-            except Exception as e:
-                print(f"⚠️ Error in logout callback: {e}")
-                # Fallback: destroy ourselves
-                try:
-                    self.destroy()
-                except:
-                    pass
+            self.on_logout_callback()
         else:
-            # No callback provided - just destroy ourselves
-            try:
-                self.destroy()
-            except:
-                pass
+            # Fallback: just destroy this window
+            self.destroy()
     
     # ===== LOAD FOLDERS AND REPORTS =====
     
