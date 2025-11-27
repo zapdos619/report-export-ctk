@@ -704,42 +704,43 @@ class SalesforceReportExporter:
         tmp_dir = Path(tempfile.mkdtemp(prefix="sf_reports_"))
 
         try:
-            # --- CHANGED SECTION START ---
-            # Instead of fetching ALL reports and filtering, we query exactly the IDs we need.
-            # This bypasses API visibility filters that hide "Automated Process" reports.
-            
+            # --- IMPROVED: Direct SOQL lookup with pagination ---
             if not report_ids:
-                 reports = []
+                reports = []
             else:
-                # Format IDs for SOQL: 'id1','id2','id3'
-                ids_formatted = ",".join([f"'{rid}'" for rid in report_ids])
-                query = f"SELECT Id, Name, Format FROM Report WHERE Id IN ({ids_formatted})"
+                # Split into chunks of 100 IDs (SOQL IN clause limit is ~1000 chars)
+                chunk_size = 100
+                reports = []
                 
-                query_url = f"{self.instance_url}/services/data/{self.api_version}/query"
-                params = {"q": query}
-                
-                # Execute the specific lookup
-                response = requests.get(
-                    query_url, 
-                    headers=self.api_headers, 
-                    params=params, 
-                    timeout=30
-                )
-                
-                if response.status_code == 200:
-                    records = response.json().get("records", [])
-                    reports = []
-                    for record in records:
-                        reports.append({
-                            "id": record.get("Id"),
-                            "name": record.get("Name"),
-                            "reportFormat": record.get("Format", "TABULAR")
-                        })
-                else:
-                    # Fallback: if query fails, try to proceed with just IDs
-                    reports = [{"id": rid, "name": rid, "reportFormat": "TABULAR"} for rid in report_ids]
-
-            # --- CHANGED SECTION END ---
+                for i in range(0, len(report_ids), chunk_size):
+                    chunk_ids = report_ids[i:i + chunk_size]
+                    ids_formatted = ",".join([f"'{rid}'" for rid in chunk_ids])
+                    
+                    base_query = f"""
+                        SELECT Id, Name, Format 
+                        FROM Report 
+                        WHERE Id IN ({ids_formatted})
+                    """
+                    
+                    try:
+                        # Use pagination helper (though with 100 IDs we won't need pagination)
+                        chunk_records = self._query_with_pagination(base_query.strip(), batch_size=2000)
+                        
+                        for record in chunk_records:
+                            reports.append({
+                                "id": record.get("Id"),
+                                "name": record.get("Name"),
+                                "reportFormat": record.get("Format", "TABULAR")
+                            })
+                    except Exception as e:
+                        print(f"Error fetching report chunk: {str(e)}")
+                        # Fallback: create entries with just IDs
+                        for rid in chunk_ids:
+                            reports.append({
+                                "id": rid,
+                                "name": rid,
+                                "reportFormat": "TABULAR"
+                            })
             
             total = len(reports)
             completed = 0
