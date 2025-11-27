@@ -307,6 +307,8 @@ class SalesforceExporterApp(ctk.CTk):
         # ===== NEW: Window move/resize event handler =====
         self.bind('<Configure>', self._on_window_configure)
         self._last_window_geometry = None  # Track window position changes
+        self._last_export_state = None  # ✅ ADD THIS - Track export state changes
+        self._configure_timer = None  # ✅ ADD THIS - Debounce timer
         
     def _setup_ui(self):
         """Setup the main UI layout"""
@@ -435,44 +437,83 @@ class SalesforceExporterApp(ctk.CTk):
     
     def _on_window_configure(self, event=None):
         """
-        Handle window move/resize events.
+        Handle window move/resize events with debouncing.
         Fixes button visibility issues when moving between monitors.
         """
         # Only process events for the main window (not child widgets)
         if event and event.widget != self:
             return
         
-        # Get current geometry
-        current_geometry = self.geometry()
+        # ✅ FIX 1: Cancel any pending configure updates (debouncing)
+        if hasattr(self, '_configure_timer') and self._configure_timer:
+            self.after_cancel(self._configure_timer)
         
-        # Only act if geometry actually changed
-        if current_geometry == self._last_window_geometry:
-            return
-        
-        self._last_window_geometry = current_geometry
-        
-        # Fix button visibility based on current state
-        with self.ui_lock:
-            is_exporting = self.is_exporting
-        
-        if is_exporting:
-            # Should show CANCEL button only
-            self.export_button.grid_remove()
-            self.cancel_button.grid()
-            if self.cancel_button.cget("state") == "disabled":
-                # If cancel is disabled, we're in "cancelling" state
-                self.cancel_button.configure(text="🛑 Cancelling...")
-            else:
-                self.cancel_button.configure(text="🛑 Cancel Export")
-        else:
-            # Should show EXPORT button only
-            self.cancel_button.grid_remove()
-            self.cancel_button.configure(state="disabled")
-            self.export_button.grid()
+        # ✅ FIX 2: Schedule update after window settles (300ms delay)
+        self._configure_timer = self.after(300, self._apply_window_configure)
+
+    def _apply_window_configure(self):
+        """
+        Apply window configuration changes after debounce delay.
+        Only updates UI if state actually changed.
+        """
+        try:
+            # Get current geometry
+            current_geometry = self.geometry()
             
-            # Update export button state
-            self._update_export_button_state()
-        
+            # ✅ FIX 3: Only compare size, not position (ignore x,y coordinates)
+            # Format: "WIDTHxHEIGHT+X+Y" -> extract "WIDTHxHEIGHT"
+            current_size = current_geometry.split('+')[0] if '+' in current_geometry else current_geometry
+            last_size = self._last_window_geometry.split('+')[0] if hasattr(self, '_last_window_geometry') and self._last_window_geometry and '+' in self._last_window_geometry else None
+            
+            # Only act if SIZE actually changed (ignore position changes)
+            if current_size == last_size:
+                return
+            
+            self._last_window_geometry = current_geometry
+            
+            # ✅ FIX 4: Only update button visibility if export state changed
+            with self.ui_lock:
+                current_export_state = self.is_exporting
+            
+            # Check if we need to update buttons at all
+            if not hasattr(self, '_last_export_state'):
+                self._last_export_state = None
+            
+            # Only update if export state changed OR first run
+            if current_export_state == self._last_export_state:
+                return  # State unchanged, no need to update buttons
+            
+            self._last_export_state = current_export_state
+            
+            # Now update button visibility based on state
+            if current_export_state:
+                # Should show CANCEL button only
+                self.export_button.grid_remove()
+                self.cancel_button.grid()
+                if self.cancel_button.cget("state") == "disabled":
+                    self.cancel_button.configure(text="🛑 Cancelling...")
+                else:
+                    self.cancel_button.configure(text="🛑 Cancel Export")
+            else:
+                # Should show EXPORT button only
+                self.cancel_button.grid_remove()
+                self.cancel_button.configure(state="disabled")
+                self.export_button.grid()
+                
+                # Update export button state
+                self._update_export_button_state()
+            
+            # Force UI refresh
+            self.update_idletasks()
+            
+        except Exception as e:
+            # Silently ignore errors during configure (window might be closing)
+            pass
+        finally:
+            # Clear timer reference
+            if hasattr(self, '_configure_timer'):
+                self._configure_timer = None
+            
     def _create_header(self):
         """Create header section with title and login status"""
         header_frame = ctk.CTkFrame(self, height=80, corner_radius=0)
@@ -536,53 +577,58 @@ class SalesforceExporterApp(ctk.CTk):
         self._create_right_panel(content_frame)
     
     def _create_left_panel(self, parent):
-        """Create left panel - Available folders and reports"""
+        """Create left panel - Compact layout with fixed search"""
         
         left_panel = ctk.CTkFrame(parent)
         left_panel.grid(row=0, column=0, sticky="nsew", padx=(10, 5), pady=10)
-        left_panel.grid_rowconfigure(2, weight=1)
+        
+        # KEY FIX: Row 3 gets weight 1 (expands). Others get weight 0 (fixed).
+        left_panel.grid_rowconfigure(0, weight=0) # Header
+        left_panel.grid_rowconfigure(1, weight=0) # Button
+        left_panel.grid_rowconfigure(2, weight=0) # Search
+        left_panel.grid_rowconfigure(3, weight=1) # Tree View (The big list)
         left_panel.grid_columnconfigure(0, weight=1)
         
-        # Header
+        # Header (Reduced padding)
         header_label = ctk.CTkLabel(
             left_panel,
             text="Available Items",
             font=ctk.CTkFont(size=16, weight="bold")
         )
-        header_label.grid(row=0, column=0, sticky="w", padx=15, pady=(15, 10))
+        header_label.grid(row=0, column=0, sticky="w", padx=10, pady=(10, 5))
         
-        # "All Folders" button
+        # "All Folders" button (Reduced padding)
         self.all_folders_btn = ctk.CTkButton(
             left_panel,
             text="📁 All Folders",
             command=self._load_all_folders,
-            height=35,
+            height=30, # Slightly shorter
             fg_color="#1f6aa5",
             hover_color="#144870",
             state="disabled"
         )
-        self.all_folders_btn.grid(row=1, column=0, sticky="ew", padx=15, pady=(0, 10))
+        self.all_folders_btn.grid(row=1, column=0, sticky="ew", padx=10, pady=(0, 5))
         
-        # Search box
+        # Search box (Fixed below button)
         search_frame = ctk.CTkFrame(left_panel, fg_color="transparent")
-        search_frame.grid(row=2, column=0, sticky="ew", padx=15, pady=(0, 10))
+        search_frame.grid(row=2, column=0, sticky="ew", padx=10, pady=(0, 5))
         search_frame.grid_columnconfigure(0, weight=1)
         
         self.left_search_entry = ctk.CTkEntry(
             search_frame,
             placeholder_text="🔍 Search folders and reports...",
-            height=32
+            height=30
         )
         self.left_search_entry.grid(row=0, column=0, sticky="ew")
         self.left_search_entry.bind("<KeyRelease>", self._on_left_search)
         
-        # Tree view container (using CTkScrollableFrame)
+        # Tree view container (This will now expand fully)
         self.tree_container = ctk.CTkScrollableFrame(
             left_panel,
             fg_color="#2b2b2b",
             corner_radius=5
         )
-        self.tree_container.grid(row=3, column=0, sticky="nsew", padx=15, pady=(0, 15))
+        self.tree_container.grid(row=3, column=0, sticky="nsew", padx=10, pady=(0, 10))
         self.tree_container.grid_columnconfigure(0, weight=1)
         
         # Placeholder
@@ -594,64 +640,62 @@ class SalesforceExporterApp(ctk.CTk):
         )
         self.tree_placeholder.grid(row=0, column=0, pady=20)
         
-        # Store reference to tree items
         self.tree_items: Dict[str, Dict] = {}
-        
-        # Initialize virtual tree view
-        self.virtual_tree = VirtualTreeView(
-            parent_frame=self.tree_container,
-            item_height=45,  # Height per folder item
-            visible_items=12  # Approximate visible folders
-        )
+        # NOTE: Removed VirtualTreeView initialization to fix scrollbar
     
     
     def _create_right_panel(self, parent):
-        """Create right panel - Selected items for export"""
+        """Create right panel - Compact layout"""
         
         right_panel = ctk.CTkFrame(parent)
         right_panel.grid(row=0, column=1, sticky="nsew", padx=(5, 10), pady=10) 
-        right_panel.grid_rowconfigure(2, weight=1)
+        
+        # Configure rows (Row 2 gets the expansion)
+        right_panel.grid_rowconfigure(0, weight=0)
+        right_panel.grid_rowconfigure(1, weight=0)
+        right_panel.grid_rowconfigure(2, weight=1) # List expands
+        right_panel.grid_rowconfigure(3, weight=0)
         right_panel.grid_columnconfigure(0, weight=1)
         
-        # Header
+        # Header - REDUCED PADDING
         header_label = ctk.CTkLabel(
             right_panel,
             text="Selected for Export",
             font=ctk.CTkFont(size=16, weight="bold")
         )
-        header_label.grid(row=0, column=0, sticky="w", padx=15, pady=(15, 10))
+        header_label.grid(row=0, column=0, sticky="w", padx=10, pady=(10, 2))  # ✅ REDUCED from pady=(10, 5)
         
-        # Selection count
+        # Selection count - REDUCED PADDING
         self.selection_count_label = ctk.CTkLabel(
             right_panel,
             text="0 reports selected",
             font=ctk.CTkFont(size=12),
             text_color="gray"
         )
-        self.selection_count_label.grid(row=1, column=0, sticky="w", padx=15, pady=(0, 10))
+        self.selection_count_label.grid(row=1, column=0, sticky="w", padx=10, pady=(0, 3))  # ✅ REDUCED from pady=(0, 5)
         
-        # Selected items list (scrollable)
+        # Selected items list (Scrollable, expands)
         self.selected_container = ctk.CTkScrollableFrame(
             right_panel,
             fg_color="#2b2b2b",
             corner_radius=5
         )
-        self.selected_container.grid(row=2, column=0, sticky="nsew", padx=15, pady=(0, 15))
+        self.selected_container.grid(row=2, column=0, sticky="nsew", padx=10, pady=(0, 5))  # ✅ REDUCED from pady=(0, 10)
         self.selected_container.grid_columnconfigure(0, weight=1)
         
         # Placeholder
         self.selected_placeholder = ctk.CTkLabel(
             self.selected_container,
-            text="No reports selected.\nSelect folders or reports from the left panel.",
+            text="No reports selected.\nSelect from left panel.",
             text_color="gray",
             font=ctk.CTkFont(size=12),
             justify="center"
         )
         self.selected_placeholder.grid(row=0, column=0, pady=30)
         
-        # Actions section
+        # Actions section - REDUCED PADDING
         actions_frame = ctk.CTkFrame(right_panel, fg_color="transparent")
-        actions_frame.grid(row=3, column=0, sticky="ew", padx=15, pady=(0, 15))
+        actions_frame.grid(row=3, column=0, sticky="ew", padx=10, pady=(0, 8))  # ✅ REDUCED from pady=(0, 10)
         actions_frame.grid_columnconfigure(0, weight=1)
         
         actions_label = ctk.CTkLabel(
@@ -659,19 +703,19 @@ class SalesforceExporterApp(ctk.CTk):
             text="Actions",
             font=ctk.CTkFont(size=13, weight="bold")
         )
-        actions_label.grid(row=0, column=0, sticky="w", pady=(0, 5))
+        actions_label.grid(row=0, column=0, sticky="w", pady=(0, 2))
         
-        # Quick remove all button
+        # Quick remove all button - SMALLER HEIGHT
         self.clear_selected_button = ctk.CTkButton(
             actions_frame,
             text="Clear All Selected",
             command=self._clear_all_selected,
-            height=35,
+            height=28,  # ✅ REDUCED from 30
             fg_color="#d32f2f",
             hover_color="#9a2222",
             state="disabled"
         )
-        self.clear_selected_button.grid(row=1, column=0, sticky="ew", pady=(0, 5))
+        self.clear_selected_button.grid(row=1, column=0, sticky="ew", pady=(0, 3))  # ✅ REDUCED from pady=(0, 5)
     
     def _create_bottom_section(self):
         """Create bottom section with file naming, progress, export button, and log"""
@@ -1244,8 +1288,8 @@ class SalesforceExporterApp(ctk.CTk):
             
     def _populate_tree_chunked(self, search_term: str = ""):
         """
-        Populate tree using virtual scrolling for instant rendering.
-        Now handles unlimited folders/reports without UI freezing.
+        Standard tree population. 
+        Fixes scrollbar issues by creating actual widgets.
         """
         
         # Clear existing tree
@@ -1254,106 +1298,56 @@ class SalesforceExporterApp(ctk.CTk):
         
         self.tree_items.clear()
         
-        if self.virtual_tree:
-            self.virtual_tree.clear()
-        
-        if not self.available_folders:
-            placeholder = ctk.CTkLabel(
-                self.tree_container,
-                text="No folders found",
-                text_color="gray",
-                font=ctk.CTkFont(size=12)
-            )
-            placeholder.grid(row=0, column=0, pady=30)
-            return
-        
-        # Prepare filtered data
+        # Filter folders and reports by search term
         filtered_folders_data = []
         
         with self.data_lock:
+            # (Logic to filter data same as before...)
             if search_term:
                 search_lower = search_term.lower()
-                
                 for folder in self.available_folders:
                     folder_id = folder.get("id")
                     folder_name = folder.get("name", "")
-                    
                     all_reports = self.reports_by_folder.get(folder_id, [])
                     
                     folder_matches = search_lower in folder_name.lower()
-                    
                     if folder_matches:
-                        filtered_folders_data.append({
-                            "folder": folder,
-                            "reports": all_reports
-                        })
+                        filtered_folders_data.append({"folder": folder, "reports": all_reports})
                     else:
-                        matching_reports = [
-                            r for r in all_reports
-                            if search_lower in r.get("name", "").lower()
-                        ]
-                        
+                        matching_reports = [r for r in all_reports if search_lower in r.get("name", "").lower()]
                         if matching_reports:
-                            filtered_folders_data.append({
-                                "folder": folder,
-                                "reports": matching_reports
-                            })
+                            filtered_folders_data.append({"folder": folder, "reports": matching_reports})
             else:
                 for folder in self.available_folders:
                     folder_id = folder.get("id")
-                    filtered_folders_data.append({
-                        "folder": folder,
-                        "reports": self.reports_by_folder.get(folder_id, [])
-                    })
+                    filtered_folders_data.append({"folder": folder, "reports": self.reports_by_folder.get(folder_id, [])})
         
-        if not filtered_folders_data and search_term:
-            placeholder = ctk.CTkLabel(
-                self.tree_container,
-                text=f"No results found for '{search_term}'",
-                text_color="gray",
-                font=ctk.CTkFont(size=12)
-            )
-            placeholder.grid(row=0, column=0, pady=30)
+        if not filtered_folders_data:
+            msg = f"No results for '{search_term}'" if search_term else "No folders found"
+            ctk.CTkLabel(self.tree_container, text=msg, text_color="gray").grid(row=0, column=0, pady=20)
             return
-        
-        # Store data in tree_items for reference
-        for idx, folder_data in enumerate(filtered_folders_data):
-            folder = folder_data["folder"]
-            folder_id = folder.get("id")
-            reports = folder_data["reports"]
-            
-            self.tree_items[folder_id] = {
-                "folder": folder,
-                "folder_name": folder.get("name", "Unknown"),
-                "reports": reports,
-                "expanded": False,
-                "row_index": idx,
-                "checkbox_var": None,  # Will be created on-demand
-                "report_checkboxes": {}
-            }
-        
-        # Use virtual rendering with chunking for smooth experience
+
+        # RENDER DIRECTLY (Fixes Scrollbar)
+        # We process in small batches to not freeze UI, but we create REAL widgets
+        chunk_size = 20
         total_folders = len(filtered_folders_data)
-        chunk_size = 50  # Create 50 folders at a time
         
         def render_chunk(start_idx):
             end_idx = min(start_idx + chunk_size, total_folders)
             
             for i in range(start_idx, end_idx):
                 folder_data = filtered_folders_data[i]
-                self._create_folder_item_virtual(i, folder_data["folder"], folder_data["reports"])
+                # Pass 'i' as the row index
+                self._create_folder_item(i, folder_data["folder"], folder_data["reports"])
             
+            # If more to render, schedule next batch
             if end_idx < total_folders:
-                progress_pct = int((end_idx / total_folders) * 100)
-                self._log(f"🔄 Building tree: {end_idx}/{total_folders} ({progress_pct}%)")
                 self.after(5, lambda: render_chunk(end_idx))
             else:
-                self._log(f"✅ Tree ready: {total_folders} folders")
-        
-        if total_folders > chunk_size:
-            self._log(f"🔄 Building tree structure ({total_folders} folders)...")
+                self._log(f"✅ Tree view loaded: {total_folders} folders")
         
         render_chunk(0)
+        
         
     def _populate_tree_chunked(self, search_term: str = ""):
         """
@@ -1456,18 +1450,18 @@ class SalesforceExporterApp(ctk.CTk):
         render_chunk(0)
         
     def _create_folder_item(self, row: int, folder: Dict, reports_to_show: List[Dict]):
-        """Create a folder item in the tree"""
+        """Create a folder item in the tree, now with tighter padding"""
         
         folder_id = folder.get("id")
         folder_name = folder.get("name", "Unnamed Folder")
         folder_type = folder.get("type", "")
         
-        # Use the filtered reports passed in (not from self.reports_by_folder)
         reports_in_folder = reports_to_show
         
         # Main folder frame
         folder_frame = ctk.CTkFrame(self.tree_container, fg_color="#333333", corner_radius=5)
-        folder_frame.grid(row=row * 2, column=0, sticky="ew", padx=5, pady=3)
+        # KEY FIX: Reduced pady from 3 to 2 for tighter vertical blocks
+        folder_frame.grid(row=row * 2, column=0, sticky="ew", padx=5, pady=(2, 2))
         folder_frame.grid_columnconfigure(2, weight=1)
         
         # Folder checkbox
@@ -1481,7 +1475,8 @@ class SalesforceExporterApp(ctk.CTk):
             checkbox_height=18,
             command=lambda: self._on_folder_checkbox_changed(folder_id, folder_checkbox_var)
         )
-        folder_checkbox.grid(row=0, column=0, padx=(10, 5), pady=10, sticky="w")
+        # KEY FIX: Reduced internal pady from 10 to 5
+        folder_checkbox.grid(row=0, column=0, padx=(10, 5), pady=5, sticky="w")
         
         # Expand/collapse button
         expand_btn = ctk.CTkButton(
@@ -1494,7 +1489,8 @@ class SalesforceExporterApp(ctk.CTk):
             font=ctk.CTkFont(size=12),
             command=lambda: self._toggle_folder_expansion(folder_id)
         )
-        expand_btn.grid(row=0, column=1, padx=(0, 5), pady=10, sticky="w")
+        # KEY FIX: Reduced internal pady from 10 to 5
+        expand_btn.grid(row=0, column=1, padx=(0, 5), pady=5, sticky="w")
         
         # Folder icon and name
         icon = "🌐" if folder_type == "Public" else "👤" if "My" in folder_name else "📂"
@@ -1504,11 +1500,13 @@ class SalesforceExporterApp(ctk.CTk):
             font=ctk.CTkFont(size=12),
             anchor="w"
         )
-        folder_label.grid(row=0, column=2, sticky="ew", padx=(0, 10), pady=10)
+        # KEY FIX: Reduced internal pady from 10 to 5
+        folder_label.grid(row=0, column=2, sticky="ew", padx=(0, 10), pady=5)
         
         # Reports container (initially hidden)
         reports_frame = ctk.CTkFrame(self.tree_container, fg_color="#2b2b2b")
-        reports_frame.grid(row=row * 2 + 1, column=0, sticky="ew", padx=(30, 5), pady=(0, 3))
+        # KEY FIX: Reduced pady for reports container separation
+        reports_frame.grid(row=row * 2 + 1, column=0, sticky="ew", padx=(30, 5), pady=(0, 2))
         reports_frame.grid_remove()  # Hide initially
         reports_frame.grid_columnconfigure(0, weight=1)
         
@@ -1522,7 +1520,7 @@ class SalesforceExporterApp(ctk.CTk):
             "expanded": False,
             "reports": reports_in_folder,
             "folder_name": folder_name,
-            "report_checkboxes": {}  # Initialize empty dict
+            "report_checkboxes": {}
         }
         
         # Create report items inside reports_frame
@@ -1535,7 +1533,8 @@ class SalesforceExporterApp(ctk.CTk):
                 text_color="gray",
                 font=ctk.CTkFont(size=11)
             )
-            no_reports_label.grid(row=0, column=0, padx=20, pady=10)
+            no_reports_label.grid(row=0, column=0, padx=10, pady=5)
+            
     
     def _create_folder_item_virtual(self, row: int, folder: Dict, reports_to_show: List[Dict]):
         """
@@ -1630,8 +1629,11 @@ class SalesforceExporterApp(ctk.CTk):
             report_frame.grid(row=idx, column=0, sticky="ew", padx=10, pady=2)
             report_frame.grid_columnconfigure(1, weight=1)
             
-            # Report checkbox
-            report_checkbox_var = ctk.BooleanVar(value=False)
+            # ✅ FIX: Check if this report is already selected
+            is_selected = report_id in self.selected_items
+            
+            # Report checkbox - set initial value based on selection state
+            report_checkbox_var = ctk.BooleanVar(value=is_selected)  # ← FIXED
             report_checkbox = ctk.CTkCheckBox(
                 report_frame,
                 text="",
@@ -1662,6 +1664,8 @@ class SalesforceExporterApp(ctk.CTk):
                 "checkbox_var": report_checkbox_var,
                 "name": report_name
             }
+            
+            
     def _load_reports_for_folder(self, folder_id: str, reports_frame, reports: List[Dict]):
         """
         Lazy load report checkboxes for a folder.
@@ -1752,6 +1756,10 @@ class SalesforceExporterApp(ctk.CTk):
             if not reports_loaded and reports:
                 self._load_reports_for_folder(folder_id, reports_frame, reports)
                 tree_item["reports_loaded"] = True
+                
+                # ✅ FIX: After loading, sync checkbox states with selected_items
+                self._sync_folder_checkboxes(folder_id)
+                
             elif not reports:
                 # Show empty message
                 no_reports_label = ctk.CTkLabel(
@@ -1762,8 +1770,33 @@ class SalesforceExporterApp(ctk.CTk):
                 )
                 no_reports_label.grid(row=0, column=0, padx=20, pady=10)
                 tree_item["reports_loaded"] = True
+            else:
+                # ✅ FIX: Reports already loaded, but might need syncing
+                self._sync_folder_checkboxes(folder_id)
             
             reports_frame.grid()
+    
+    def _sync_folder_checkboxes(self, folder_id: str):
+        """
+        Sync report checkboxes with actual selection state.
+        Call this after lazy-loading reports or when selection changes.
+        """
+        if folder_id not in self.tree_items:
+            return
+        
+        tree_item = self.tree_items[folder_id]
+        report_checkboxes = tree_item.get("report_checkboxes", {})
+        
+        # Update each report checkbox to match selection state
+        for report_id, checkbox_data in report_checkboxes.items():
+            is_selected = report_id in self.selected_items
+            checkbox_var = checkbox_data.get("checkbox_var")
+            
+            if checkbox_var:
+                # Only update if state is different (prevent unnecessary events)
+                current_value = checkbox_var.get()
+                if current_value != is_selected:
+                    checkbox_var.set(is_selected)
     
     def _on_folder_checkbox_changed(self, folder_id: str, checkbox_var: ctk.BooleanVar):
         """Handle folder checkbox change - select/deselect all reports in folder"""
@@ -1869,7 +1902,7 @@ class SalesforceExporterApp(ctk.CTk):
     # ===== SELECTED PANEL MANAGEMENT =====
     
     def _refresh_selected_panel(self):
-        """Refresh the selected items panel"""
+        """Refresh the selected items panel - COMPACT VERSION"""
         
         # Clear existing widgets
         for widget in self.selected_container.winfo_children():
@@ -1879,12 +1912,12 @@ class SalesforceExporterApp(ctk.CTk):
             # Show placeholder
             self.selected_placeholder = ctk.CTkLabel(
                 self.selected_container,
-                text="No reports selected.\nSelect folders or reports from the left panel.",
+                text="No reports selected.\nSelect from left panel.",
                 text_color="gray",
-                font=ctk.CTkFont(size=12),
+                font=ctk.CTkFont(size=11),
                 justify="center"
             )
-            self.selected_placeholder.grid(row=0, column=0, pady=30)
+            self.selected_placeholder.grid(row=0, column=0, pady=20)
             
             # Update count
             self.selection_count_label.configure(text="0 reports selected", text_color="gray")
@@ -1908,47 +1941,47 @@ class SalesforceExporterApp(ctk.CTk):
         # Create items grouped by folder
         row = 0
         for folder_name, items in sorted(items_by_folder.items()):
-            # Folder header
-            folder_header = ctk.CTkFrame(self.selected_container, fg_color="#333333", corner_radius=3)
-            folder_header.grid(row=row, column=0, sticky="ew", padx=5, pady=(5, 2))
+            # Folder header - ULTRA COMPACT
+            folder_header = ctk.CTkFrame(self.selected_container, fg_color="#333333", corner_radius=2)
+            folder_header.grid(row=row, column=0, sticky="ew", padx=3, pady=(0, 0))  # ✅ MINIMAL padding
             folder_header.grid_columnconfigure(0, weight=1)
             
             folder_label = ctk.CTkLabel(
                 folder_header,
-                text=f"📁 {folder_name} ({len(items)} reports)",
-                font=ctk.CTkFont(size=11, weight="bold"),
+                text=f"📁 {folder_name} ({len(items)})",
+                font=ctk.CTkFont(size=10, weight="bold"),  # ✅ SMALLER font
                 anchor="w"
             )
-            folder_label.grid(row=0, column=0, sticky="ew", padx=10, pady=5)
+            folder_label.grid(row=0, column=0, sticky="ew", padx=6, pady=2)  # ✅ TIGHT padding
             
             row += 1
             
-            # Report items under this folder
+            # Report items - ULTRA COMPACT
             for item in sorted(items, key=lambda x: x["name"]):
-                item_frame = ctk.CTkFrame(self.selected_container, fg_color="#2b2b2b", corner_radius=3)
-                item_frame.grid(row=row, column=0, sticky="ew", padx=(15, 5), pady=1)
+                item_frame = ctk.CTkFrame(self.selected_container, fg_color="#2b2b2b", corner_radius=2)
+                item_frame.grid(row=row, column=0, sticky="ew", padx=(8, 3), pady=0)  # ✅ NO vertical gap!
                 item_frame.grid_columnconfigure(0, weight=1)
                 
                 item_label = ctk.CTkLabel(
                     item_frame,
-                    text=f"  📄 {item['name']}",
-                    font=ctk.CTkFont(size=10),
+                    text=f" 📄 {item['name'][:50]}{'...' if len(item['name']) > 50 else ''}",  # ✅ TRUNCATE long names
+                    font=ctk.CTkFont(size=9),  # ✅ SMALLER font
                     anchor="w"
                 )
-                item_label.grid(row=0, column=0, sticky="ew", padx=10, pady=4)
+                item_label.grid(row=0, column=0, sticky="ew", padx=6, pady=1)  # ✅ MINIMAL padding
                 
-                # Remove button
+                # Remove button - TINY
                 remove_btn = ctk.CTkButton(
                     item_frame,
-                    text="✕",
-                    width=25,
-                    height=20,
+                    text="×",  # ✅ Single character
+                    width=18,  # ✅ TINY
+                    height=16,  # ✅ TINY
                     fg_color="transparent",
                     hover_color="#d32f2f",
                     font=ctk.CTkFont(size=12),
                     command=lambda item_id=item['id']: self._remove_item_from_selected(item_id)
                 )
-                remove_btn.grid(row=0, column=1, padx=5, pady=4)
+                remove_btn.grid(row=0, column=1, padx=2, pady=1)  # ✅ MINIMAL padding
                 
                 row += 1
         
@@ -1962,7 +1995,7 @@ class SalesforceExporterApp(ctk.CTk):
         # Enable buttons
         self.clear_selected_button.configure(state="normal")
         self._update_export_button_state()
-    
+            
     def _remove_item_from_selected(self, item_id: str):
         """Remove a single item from selected panel"""
         
