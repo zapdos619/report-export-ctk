@@ -14,124 +14,7 @@ from tkinter import filedialog, messagebox, ttk
 from typing import Optional, List, Dict, Any, Callable
 from login_window import LoginWindow
 from exporter import SalesforceReportExporter
-
-class VirtualTreeView:
-    """
-    Virtual scrolling tree view for handling 10,000+ items.
-    Only renders visible items to prevent UI freezing.
-    """
-    
-    def __init__(
-        self,
-        parent_frame: ctk.CTkScrollableFrame,
-        item_height: int = 40,
-        visible_items: int = 15
-    ):
-        self.parent_frame = parent_frame
-        self.item_height = item_height
-        self.visible_items = visible_items
-        
-        # Data storage
-        self.all_items = []  # List of all folder items
-        self.visible_widgets = {}  # Currently rendered widgets
-        self.expanded_folders = set()  # Track expanded folder IDs
-        
-        # Scroll tracking
-        self.last_scroll_pos = 0
-        self.render_buffer = 5  # Extra items to render above/below view
-        
-        # Setup scroll monitoring
-        self.parent_frame.bind("<Configure>", self._on_scroll)
-        
-    def set_items(self, items: List[Dict]):
-        """Set all items to be displayed"""
-        self.all_items = items
-        self._render_visible_items()
-    
-    def _on_scroll(self, event=None):
-        """Handle scroll event - render visible items"""
-        # Get current scroll position
-        try:
-            # For CTkScrollableFrame, we need to check the canvas
-            canvas = self.parent_frame._parent_canvas
-            scroll_pos = canvas.yview()[0]
-            
-            # Only re-render if scroll changed significantly
-            if abs(scroll_pos - self.last_scroll_pos) > 0.05:
-                self.last_scroll_pos = scroll_pos
-                self._render_visible_items()
-        except:
-            pass
-    
-    def _render_visible_items(self):
-        """Render only the visible items in the viewport"""
-        if not self.all_items:
-            return
-        
-        # Calculate visible range
-        try:
-            canvas = self.parent_frame._parent_canvas
-            canvas_height = canvas.winfo_height()
-            scroll_y = canvas.yview()[0]
-            
-            total_height = len(self.all_items) * self.item_height
-            visible_start_y = scroll_y * total_height
-            visible_end_y = visible_start_y + canvas_height
-            
-            # Calculate item indices
-            start_idx = max(0, int(visible_start_y / self.item_height) - self.render_buffer)
-            end_idx = min(len(self.all_items), int(visible_end_y / self.item_height) + self.render_buffer + 1)
-            
-        except:
-            # Fallback: render first visible_items
-            start_idx = 0
-            end_idx = min(len(self.all_items), self.visible_items + self.render_buffer)
-        
-        # Track which widgets should exist
-        should_exist = set(range(start_idx, end_idx))
-        current_exist = set(self.visible_widgets.keys())
-        
-        # Remove widgets that are out of view
-        to_remove = current_exist - should_exist
-        for idx in to_remove:
-            if idx in self.visible_widgets:
-                widget = self.visible_widgets[idx]
-                widget.destroy()
-                del self.visible_widgets[idx]
-        
-        # Create widgets that should be visible but don't exist
-        to_create = should_exist - current_exist
-        for idx in sorted(to_create):
-            if idx < len(self.all_items):
-                self._create_item_widget(idx)
-    
-    def _create_item_widget(self, idx: int):
-        """Create widget for item at index - Override in parent class"""
-        pass
-    
-    def toggle_folder(self, folder_id: str):
-        """Toggle folder expansion state"""
-        if folder_id in self.expanded_folders:
-            self.expanded_folders.remove(folder_id)
-        else:
-            self.expanded_folders.add(folder_id)
-    
-    def is_expanded(self, folder_id: str) -> bool:
-        """Check if folder is expanded"""
-        return folder_id in self.expanded_folders
-    
-    def clear(self):
-        """Clear all items and widgets"""
-        for widget in self.visible_widgets.values():
-            try:
-                widget.destroy()
-            except:
-                pass
-        
-        self.visible_widgets.clear()
-        self.all_items.clear()
-        self.expanded_folders.clear()
-        self.last_scroll_pos = 0
+from virtual_tree import VirtualTreeView 
 
 
 class ExportProgressTracker:
@@ -295,6 +178,10 @@ class SalesforceExporterApp(ctk.CTkToplevel):
         # Selection tracking
         self.selected_items: Dict[str, Dict] = {}
         self.search_timer = None
+        
+        # ✅ NEW: Virtual tree view instance
+        self.virtual_tree: Optional[VirtualTreeView] = None
+        self.tree_items: Dict[str, Dict] = {}  # Keep for compatibility
         
         # Progress tracker
         self.progress_tracker = ExportProgressTracker()
@@ -763,7 +650,7 @@ class SalesforceExporterApp(ctk.CTkToplevel):
             left_panel,
             text="📁 All Folders",
             command=self._load_all_folders,
-            height=30, # Slightly shorter
+            height=30,
             fg_color="#1f6aa5",
             hover_color="#144870",
             state="disabled"
@@ -783,7 +670,7 @@ class SalesforceExporterApp(ctk.CTkToplevel):
         self.left_search_entry.grid(row=0, column=0, sticky="ew")
         self.left_search_entry.bind("<KeyRelease>", self._on_left_search)
         
-        # Tree view container (This will now expand fully)
+        # ✅ NEW: Tree view container (This will now expand fully)
         self.tree_container = ctk.CTkScrollableFrame(
             left_panel,
             fg_color="#2b2b2b",
@@ -801,8 +688,9 @@ class SalesforceExporterApp(ctk.CTkToplevel):
         )
         self.tree_placeholder.grid(row=0, column=0, pady=20)
         
+        # ✅ NEW: Initialize virtual tree (will be set up after data loads)
+        self.virtual_tree = None
         self.tree_items: Dict[str, Dict] = {}
-        # NOTE: Removed VirtualTreeView initialization to fix scrollbar
     
     
     def _create_right_panel(self, parent):
@@ -1336,7 +1224,7 @@ class SalesforceExporterApp(ctk.CTkToplevel):
             pass  # Widgets might be destroyed
     
     def _on_data_loaded(self, data: Dict):
-        """Handle data loaded successfully - with chunked tree population"""
+        """Handle data loaded successfully - with virtual tree rendering"""
         
         with self.data_lock:
             self.available_folders = data.get("folders", [])
@@ -1360,17 +1248,18 @@ class SalesforceExporterApp(ctk.CTkToplevel):
         for widget in self.tree_container.winfo_children():
             widget.destroy()
         
-        # Show temporary message
+        # ✅ IMPROVED: Show brief message, then populate immediately
         temp_label = ctk.CTkLabel(
             self.tree_container,
-            text=f"📊 Rendering {len(filtered_folders)} folders with {total_reports_in_folders} reports...\nPlease wait...",
+            text=f"📊 Loading {len(filtered_folders)} folders with {total_reports_in_folders} reports...",
             text_color="gray",
             font=ctk.CTkFont(size=11)
         )
         temp_label.grid(row=0, column=0, pady=20)
         
-        # Populate tree in chunks (non-blocking)
-        self._populate_tree_chunked()
+        # ✅ NEW: Populate tree using virtual scrolling (NO DELAY NEEDED!)
+        # Virtual scrolling renders instantly because it only creates visible items
+        self.after(100, lambda: self._populate_tree_with_data(filtered_folders, total_reports_in_folders))
         
         # Re-enable button
         self.all_folders_btn.configure(state="normal", text="📁 All Folders")
@@ -1378,8 +1267,20 @@ class SalesforceExporterApp(ctk.CTkToplevel):
         # Reset state
         self._set_ui_state("idle")
         
-            # ✅ NEW: Update export button state after loading
+        # Update export button state after loading
         self._update_export_button_state()
+
+    def _populate_tree_with_data(self, filtered_folders, total_reports_in_folders):
+        """
+        Populate tree after loading completes.
+        ✅ NEW: Helper method to populate virtual tree.
+        """
+        # Remove temp message
+        for widget in self.tree_container.winfo_children():
+            widget.destroy()
+        
+        # Populate tree (virtual scrolling makes this instant!)
+        self._populate_tree("")
         
         # Log results with statistics
         self._log("=" * 50)
@@ -1404,157 +1305,18 @@ class SalesforceExporterApp(ctk.CTkToplevel):
     
     # ===== TREE VIEW POPULATION =====
     
-    def _populate_tree(self, search_term: str = ""):
-        """Populate the tree view with folders and reports"""
-        
-        # Clear existing tree
-        for widget in self.tree_container.winfo_children():
-            widget.destroy()
-        
-        self.tree_items.clear()
-        
-        if not self.available_folders:
-            placeholder = ctk.CTkLabel(
-                self.tree_container,
-                text="No folders found",
-                text_color="gray",
-                font=ctk.CTkFont(size=12)
-            )
-            placeholder.grid(row=0, column=0, pady=30)
-            return
-        
-        # Filter folders and reports by search term
-        filtered_folders_data = []
-        
-        if search_term:
-            search_lower = search_term.lower()
-            
-            for folder in self.available_folders:
-                folder_id = folder.get("id")
-                folder_name = folder.get("name", "")
-                
-                # Get all reports in this folder
-                all_reports = self.reports_by_folder.get(folder_id, [])
-                
-                # Check if folder name matches
-                folder_matches = search_lower in folder_name.lower()
-                
-                if folder_matches:
-                    # Folder matches - include ALL reports in this folder
-                    filtered_folders_data.append({
-                        "folder": folder,
-                        "reports": all_reports
-                    })
-                else:
-                    # Folder doesn't match - check if any reports match
-                    matching_reports = [
-                        r for r in all_reports
-                        if search_lower in r.get("name", "").lower()
-                    ]
-                    
-                    if matching_reports:
-                        # Include folder with only matching reports
-                        filtered_folders_data.append({
-                            "folder": folder,
-                            "reports": matching_reports
-                        })
-        else:
-            # No search - show all folders with all reports
-            for folder in self.available_folders:
-                folder_id = folder.get("id")
-                filtered_folders_data.append({
-                    "folder": folder,
-                    "reports": self.reports_by_folder.get(folder_id, [])
-                })
-        
-        if not filtered_folders_data and search_term:
-            placeholder = ctk.CTkLabel(
-                self.tree_container,
-                text=f"No results found for '{search_term}'",
-                text_color="gray",
-                font=ctk.CTkFont(size=12)
-            )
-            placeholder.grid(row=0, column=0, pady=30)
-            return
-        
-        # Create tree items for each folder
-        for idx, folder_data in enumerate(filtered_folders_data):
-            self._create_folder_item(
-                idx, 
-                folder_data["folder"], 
-                folder_data["reports"]
-            )
-            
-    def _populate_tree_chunked(self, search_term: str = ""):
-        """
-        Standard tree population. 
-        Fixes scrollbar issues by creating actual widgets.
-        """
-        
-        # Clear existing tree
-        for widget in self.tree_container.winfo_children():
-            widget.destroy()
-        
-        self.tree_items.clear()
-        
-        # Filter folders and reports by search term
-        filtered_folders_data = []
-        
-        with self.data_lock:
-            # (Logic to filter data same as before...)
-            if search_term:
-                search_lower = search_term.lower()
-                for folder in self.available_folders:
-                    folder_id = folder.get("id")
-                    folder_name = folder.get("name", "")
-                    all_reports = self.reports_by_folder.get(folder_id, [])
-                    
-                    folder_matches = search_lower in folder_name.lower()
-                    if folder_matches:
-                        filtered_folders_data.append({"folder": folder, "reports": all_reports})
-                    else:
-                        matching_reports = [r for r in all_reports if search_lower in r.get("name", "").lower()]
-                        if matching_reports:
-                            filtered_folders_data.append({"folder": folder, "reports": matching_reports})
-            else:
-                for folder in self.available_folders:
-                    folder_id = folder.get("id")
-                    filtered_folders_data.append({"folder": folder, "reports": self.reports_by_folder.get(folder_id, [])})
-        
-        if not filtered_folders_data:
-            msg = f"No results for '{search_term}'" if search_term else "No folders found"
-            ctk.CTkLabel(self.tree_container, text=msg, text_color="gray").grid(row=0, column=0, pady=20)
-            return
 
-        # RENDER DIRECTLY (Fixes Scrollbar)
-        # We process in small batches to not freeze UI, but we create REAL widgets
-        chunk_size = 20
-        total_folders = len(filtered_folders_data)
-        
-        def render_chunk(start_idx):
-            end_idx = min(start_idx + chunk_size, total_folders)
-            
-            for i in range(start_idx, end_idx):
-                folder_data = filtered_folders_data[i]
-                # Pass 'i' as the row index
-                self._create_folder_item(i, folder_data["folder"], folder_data["reports"])
-            
-            # If more to render, schedule next batch
-            if end_idx < total_folders:
-                self.after(5, lambda: render_chunk(end_idx))
-            else:
-                self._log(f"✅ Tree view loaded: {total_folders} folders")
-        
-        render_chunk(0)
-        
-        
-    def _populate_tree_chunked(self, search_term: str = ""):
+    def _populate_tree(self, search_term: str = ""):
         """
-        Populate tree in chunks to prevent UI freezing.
-        Renders 20 folders at a time with small delays.
+        Populate the tree view with folders and reports.
+        
+        ✅ FIXED: Now uses virtual scrolling - NO UI FREEZING even with 10,000+ items!
         """
         
         # Clear existing tree
+        if self.virtual_tree:
+            self.virtual_tree.clear()
+        
         for widget in self.tree_container.winfo_children():
             widget.destroy()
         
@@ -1619,387 +1381,38 @@ class SalesforceExporterApp(ctk.CTkToplevel):
             placeholder.grid(row=0, column=0, pady=30)
             return
         
-        # Render in chunks
-        chunk_size = 20  # Render 20 folders at a time
-        total_folders = len(filtered_folders_data)
-        
-        def render_chunk(start_idx):
-            end_idx = min(start_idx + chunk_size, total_folders)
-            
-            for i in range(start_idx, end_idx):
-                folder_data = filtered_folders_data[i]
-                # Use row = i * 2 to leave space for reports
-                self._create_folder_item(i, folder_data["folder"], folder_data["reports"])
-            
-            # If more folders to render, schedule next chunk
-            if end_idx < total_folders:
-                # Update progress
-                progress_pct = int((end_idx / total_folders) * 100)
-                self._log(f"🔄 Rendering folders: {end_idx}/{total_folders} ({progress_pct}%)")
-                
-                # Schedule next chunk after 10ms delay
-                self.after(10, lambda: render_chunk(end_idx))
-            else:
-                self._log(f"✅ Tree view ready: {total_folders} folders displayed")
-        
-        # Start rendering first chunk
-        if total_folders > chunk_size:
-            self._log(f"🔄 Rendering tree view in chunks ({chunk_size} folders at a time)...")
-        
-        render_chunk(0)
-        
-    def _create_folder_item(self, row: int, folder: Dict, reports_to_show: List[Dict]):
-        """Create a folder item in the tree, now with tighter padding"""
-        
-        folder_id = folder.get("id")
-        folder_name = folder.get("name", "Unnamed Folder")
-        folder_type = folder.get("type", "")
-        
-        reports_in_folder = reports_to_show
-        
-        # Main folder frame
-        folder_frame = ctk.CTkFrame(self.tree_container, fg_color="#333333", corner_radius=5)
-        # KEY FIX: Reduced pady from 3 to 2 for tighter vertical blocks
-        folder_frame.grid(row=row * 2, column=0, sticky="ew", padx=5, pady=(2, 2))
-        folder_frame.grid_columnconfigure(2, weight=1)
-        
-        # Folder checkbox
-        folder_checkbox_var = ctk.BooleanVar(value=False)
-        folder_checkbox = ctk.CTkCheckBox(
-            folder_frame,
-            text="",
-            variable=folder_checkbox_var,
-            width=20,
-            checkbox_width=18,
-            checkbox_height=18,
-            command=lambda: self._on_folder_checkbox_changed(folder_id, folder_checkbox_var)
-        )
-        # KEY FIX: Reduced internal pady from 10 to 5
-        folder_checkbox.grid(row=0, column=0, padx=(10, 5), pady=5, sticky="w")
-        
-        # Expand/collapse button
-        expand_btn = ctk.CTkButton(
-            folder_frame,
-            text="▶",
-            width=25,
-            height=25,
-            fg_color="transparent",
-            hover_color="#444444",
-            font=ctk.CTkFont(size=12),
-            command=lambda: self._toggle_folder_expansion(folder_id)
-        )
-        # KEY FIX: Reduced internal pady from 10 to 5
-        expand_btn.grid(row=0, column=1, padx=(0, 5), pady=5, sticky="w")
-        
-        # Folder icon and name
-        icon = "🌐" if folder_type == "Public" else "👤" if "My" in folder_name else "📂"
-        folder_label = ctk.CTkLabel(
-            folder_frame,
-            text=f"{icon} {folder_name} ({len(reports_in_folder)} reports)",
-            font=ctk.CTkFont(size=12),
-            anchor="w"
-        )
-        # KEY FIX: Reduced internal pady from 10 to 5
-        folder_label.grid(row=0, column=2, sticky="ew", padx=(0, 10), pady=5)
-        
-        # Reports container (initially hidden)
-        reports_frame = ctk.CTkFrame(self.tree_container, fg_color="#2b2b2b")
-        # KEY FIX: Reduced pady for reports container separation
-        reports_frame.grid(row=row * 2 + 1, column=0, sticky="ew", padx=(30, 5), pady=(0, 2))
-        reports_frame.grid_remove()  # Hide initially
-        reports_frame.grid_columnconfigure(0, weight=1)
-        
-        # Store tree item data
-        self.tree_items[folder_id] = {
-            "frame": folder_frame,
-            "checkbox": folder_checkbox,
-            "checkbox_var": folder_checkbox_var,
-            "expand_btn": expand_btn,
-            "reports_frame": reports_frame,
-            "expanded": False,
-            "reports": reports_in_folder,
-            "folder_name": folder_name,
-            "report_checkboxes": {}
-        }
-        
-        # Create report items inside reports_frame
-        if reports_in_folder:
-            self._create_report_items(reports_frame, folder_id, reports_in_folder)
-        else:
-            no_reports_label = ctk.CTkLabel(
-                reports_frame,
-                text="No reports in this folder",
-                text_color="gray",
-                font=ctk.CTkFont(size=11)
+        # ✅ CRITICAL FIX: Create virtual tree with CORRECT parameter name
+        if not self.virtual_tree:
+            self.virtual_tree = VirtualTreeView(
+                parent_frame=self.tree_container,
+                item_height=50,
+                buffer_items=5  # ✅ Use correct parameter name that matches __init__
             )
-            no_reports_label.grid(row=0, column=0, padx=10, pady=5)
             
-    
-    def _create_folder_item_virtual(self, row: int, folder: Dict, reports_to_show: List[Dict]):
-        """
-        Create a folder item optimized for virtual scrolling.
-        Only creates checkbox and header, reports loaded on-demand.
-        """
+            # Setup callbacks
+            self.virtual_tree.on_folder_checkbox = self._on_folder_checkbox_changed_virtual
+            self.virtual_tree.on_report_checkbox = self._on_report_checkbox_changed_virtual
+            self.virtual_tree.on_folder_expand = self._on_folder_expand_virtual
         
-        folder_id = folder.get("id")
-        folder_name = folder.get("name", "Unnamed Folder")
-        folder_type = folder.get("type", "")
-        reports_in_folder = reports_to_show
+        # Set items (virtual tree will handle rendering)
+        self.virtual_tree.set_items(filtered_folders_data)
         
-        # Update tree_items with lazy-loaded data
-        if folder_id not in self.tree_items:
+        # Store tree_items for compatibility with existing code
+        for idx, folder_data in enumerate(filtered_folders_data):
+            folder_id = folder_data["folder"].get("id")
             self.tree_items[folder_id] = {
-                "folder": folder,
-                "folder_name": folder_name,
-                "reports": reports_in_folder,
-                "expanded": False,
-                "row_index": row,
+                "folder": folder_data["folder"],
+                "folder_name": folder_data["folder"].get("name", "Unknown"),
+                "reports": folder_data["reports"],
+                "row_index": idx,
                 "report_checkboxes": {}
             }
-        
-        # Main folder frame
-        folder_frame = ctk.CTkFrame(self.tree_container, fg_color="#333333", corner_radius=5)
-        folder_frame.grid(row=row * 2, column=0, sticky="ew", padx=5, pady=3)
-        folder_frame.grid_columnconfigure(2, weight=1)
-        
-        # Folder checkbox (lazy create)
-        if self.tree_items[folder_id].get("checkbox_var") is None:
-            self.tree_items[folder_id]["checkbox_var"] = ctk.BooleanVar(value=False)
-        
-        folder_checkbox_var = self.tree_items[folder_id]["checkbox_var"]
-        folder_checkbox = ctk.CTkCheckBox(
-            folder_frame,
-            text="",
-            variable=folder_checkbox_var,
-            width=20,
-            checkbox_width=18,
-            checkbox_height=18,
-            command=lambda: self._on_folder_checkbox_changed(folder_id, folder_checkbox_var)
-        )
-        folder_checkbox.grid(row=0, column=0, padx=(10, 5), pady=10, sticky="w")
-        
-        # Expand/collapse button
-        expand_btn = ctk.CTkButton(
-            folder_frame,
-            text="▶",
-            width=25,
-            height=25,
-            fg_color="transparent",
-            hover_color="#444444",
-            font=ctk.CTkFont(size=12),
-            command=lambda: self._toggle_folder_expansion(folder_id)
-        )
-        expand_btn.grid(row=0, column=1, padx=(0, 5), pady=10, sticky="w")
-        
-        # Folder icon and name
-        icon = "🌐" if folder_type == "Public" else "👤" if "My" in folder_name else "📂"
-        folder_label = ctk.CTkLabel(
-            folder_frame,
-            text=f"{icon} {folder_name} ({len(reports_in_folder)} reports)",
-            font=ctk.CTkFont(size=12),
-            anchor="w"
-        )
-        folder_label.grid(row=0, column=2, sticky="ew", padx=(0, 10), pady=10)
-        
-        # Reports container (created but hidden initially)
-        reports_frame = ctk.CTkFrame(self.tree_container, fg_color="#2b2b2b")
-        reports_frame.grid(row=row * 2 + 1, column=0, sticky="ew", padx=(30, 5), pady=(0, 3))
-        reports_frame.grid_remove()  # Hide initially
-        reports_frame.grid_columnconfigure(0, weight=1)
-        
-        # Update tree_items with widget references
-        self.tree_items[folder_id].update({
-            "frame": folder_frame,
-            "checkbox": folder_checkbox,
-            "expand_btn": expand_btn,
-            "reports_frame": reports_frame,
-            "reports_loaded": False  # Track if reports are rendered
-        })
     
-    def _create_report_items(self, parent_frame, folder_id: str, reports: List[Dict]):
-        """Create report checkboxes inside a folder's reports frame"""
-        
-        for idx, report in enumerate(reports):
-            report_id = report.get("id")
-            report_name = report.get("name", "Unnamed Report")
-            
-            # Report item frame
-            report_frame = ctk.CTkFrame(parent_frame, fg_color="transparent")
-            report_frame.grid(row=idx, column=0, sticky="ew", padx=10, pady=2)
-            report_frame.grid_columnconfigure(1, weight=1)
-            
-            # ✅ FIX: Check if this report is already selected
-            is_selected = report_id in self.selected_items
-            
-            # Report checkbox - set initial value based on selection state
-            report_checkbox_var = ctk.BooleanVar(value=is_selected)  # ← FIXED
-            report_checkbox = ctk.CTkCheckBox(
-                report_frame,
-                text="",
-                variable=report_checkbox_var,
-                width=20,
-                checkbox_width=16,
-                checkbox_height=16,
-                command=lambda rid=report_id, rname=report_name, fid=folder_id, var=report_checkbox_var: 
-                    self._on_report_checkbox_changed(rid, rname, fid, var)
-            )
-            report_checkbox.grid(row=0, column=0, padx=(5, 5), pady=5, sticky="w")
-            
-            # Report name
-            report_label = ctk.CTkLabel(
-                report_frame,
-                text=f"📄 {report_name}",
-                font=ctk.CTkFont(size=11),
-                anchor="w"
-            )
-            report_label.grid(row=0, column=1, sticky="ew", padx=(0, 10), pady=5)
-            
-            # Store report checkbox reference in tree_items
-            if "report_checkboxes" not in self.tree_items[folder_id]:
-                self.tree_items[folder_id]["report_checkboxes"] = {}
-            
-            self.tree_items[folder_id]["report_checkboxes"][report_id] = {
-                "checkbox": report_checkbox,
-                "checkbox_var": report_checkbox_var,
-                "name": report_name
-            }
-            
-            
-    def _load_reports_for_folder(self, folder_id: str, reports_frame, reports: List[Dict]):
+    def _on_folder_checkbox_changed_virtual(self, folder_id: str, checkbox_var: ctk.BooleanVar):
         """
-        Lazy load report checkboxes for a folder.
-        Only called when user expands the folder.
+        Handle folder checkbox change from virtual tree.
+        ✅ NEW: Callback for virtual tree view.
         """
-        
-        # Load in chunks for smooth rendering
-        chunk_size = 50
-        total_reports = len(reports)
-        
-        def load_chunk(start_idx):
-            end_idx = min(start_idx + chunk_size, total_reports)
-            
-            for idx in range(start_idx, end_idx):
-                report = reports[idx]
-                report_id = report.get("id")
-                report_name = report.get("name", "Unnamed Report")
-                
-                # Report item frame
-                report_frame = ctk.CTkFrame(reports_frame, fg_color="transparent")
-                report_frame.grid(row=idx, column=0, sticky="ew", padx=10, pady=2)
-                report_frame.grid_columnconfigure(1, weight=1)
-                
-                # Report checkbox
-                report_checkbox_var = ctk.BooleanVar(value=False)
-                report_checkbox = ctk.CTkCheckBox(
-                    report_frame,
-                    text="",
-                    variable=report_checkbox_var,
-                    width=20,
-                    checkbox_width=16,
-                    checkbox_height=16,
-                    command=lambda rid=report_id, rname=report_name, fid=folder_id, var=report_checkbox_var: 
-                        self._on_report_checkbox_changed(rid, rname, fid, var)
-                )
-                report_checkbox.grid(row=0, column=0, padx=(5, 5), pady=5, sticky="w")
-                
-                # Report name
-                report_label = ctk.CTkLabel(
-                    report_frame,
-                    text=f"📄 {report_name}",
-                    font=ctk.CTkFont(size=11),
-                    anchor="w"
-                )
-                report_label.grid(row=0, column=1, sticky="ew", padx=(0, 10), pady=5)
-                
-                # Store report checkbox reference
-                if "report_checkboxes" not in self.tree_items[folder_id]:
-                    self.tree_items[folder_id]["report_checkboxes"] = {}
-                
-                self.tree_items[folder_id]["report_checkboxes"][report_id] = {
-                    "checkbox": report_checkbox,
-                    "checkbox_var": report_checkbox_var,
-                    "name": report_name
-                }
-            
-            # Load next chunk if needed
-            if end_idx < total_reports:
-                self.after(10, lambda: load_chunk(end_idx))
-        
-        # Start loading first chunk
-        load_chunk(0)
-    
-    def _toggle_folder_expansion(self, folder_id: str):
-        """Toggle folder expansion with lazy loading of reports"""
-        
-        if folder_id not in self.tree_items:
-            return
-        
-        tree_item = self.tree_items[folder_id]
-        reports_frame = tree_item["reports_frame"]
-        expand_btn = tree_item["expand_btn"]
-        is_expanded = tree_item["expanded"]
-        reports_loaded = tree_item.get("reports_loaded", False)
-        reports = tree_item.get("reports", [])
-        
-        if is_expanded:
-            # Collapse
-            reports_frame.grid_remove()
-            expand_btn.configure(text="▶")
-            tree_item["expanded"] = False
-        else:
-            # Expand
-            expand_btn.configure(text="▼")
-            tree_item["expanded"] = True
-            
-            # Lazy load reports if not already loaded
-            if not reports_loaded and reports:
-                self._load_reports_for_folder(folder_id, reports_frame, reports)
-                tree_item["reports_loaded"] = True
-                
-                # ✅ FIX: After loading, sync checkbox states with selected_items
-                self._sync_folder_checkboxes(folder_id)
-                
-            elif not reports:
-                # Show empty message
-                no_reports_label = ctk.CTkLabel(
-                    reports_frame,
-                    text="No reports in this folder",
-                    text_color="gray",
-                    font=ctk.CTkFont(size=11)
-                )
-                no_reports_label.grid(row=0, column=0, padx=20, pady=10)
-                tree_item["reports_loaded"] = True
-            else:
-                # ✅ FIX: Reports already loaded, but might need syncing
-                self._sync_folder_checkboxes(folder_id)
-            
-            reports_frame.grid()
-    
-    def _sync_folder_checkboxes(self, folder_id: str):
-        """
-        Sync report checkboxes with actual selection state.
-        Call this after lazy-loading reports or when selection changes.
-        """
-        if folder_id not in self.tree_items:
-            return
-        
-        tree_item = self.tree_items[folder_id]
-        report_checkboxes = tree_item.get("report_checkboxes", {})
-        
-        # Update each report checkbox to match selection state
-        for report_id, checkbox_data in report_checkboxes.items():
-            is_selected = report_id in self.selected_items
-            checkbox_var = checkbox_data.get("checkbox_var")
-            
-            if checkbox_var:
-                # Only update if state is different (prevent unnecessary events)
-                current_value = checkbox_var.get()
-                if current_value != is_selected:
-                    checkbox_var.set(is_selected)
-    
-    def _on_folder_checkbox_changed(self, folder_id: str, checkbox_var: ctk.BooleanVar):
-        """Handle folder checkbox change - select/deselect all reports in folder"""
-        
         if folder_id not in self.tree_items:
             self._log(f"ERROR: Folder {folder_id} not found in tree_items")
             return
@@ -2011,11 +1424,8 @@ class SalesforceExporterApp(ctk.CTkToplevel):
         
         if not reports:
             self._log(f"⚠️ No reports in folder: {folder_name}")
-            checkbox_var.set(False)  # Uncheck since there's nothing to select
+            checkbox_var.set(False)
             return
-        
-        # Get report checkboxes
-        report_checkboxes = tree_item.get("report_checkboxes", {})
         
         if is_checked:
             # Select all reports in this folder
@@ -2023,17 +1433,12 @@ class SalesforceExporterApp(ctk.CTkToplevel):
                 report_id = report.get("id")
                 report_name = report.get("name", "Unnamed Report")
                 
-                # Add to selected items
                 self.selected_items[report_id] = {
                     "type": "report",
                     "name": report_name,
                     "folder_id": folder_id,
                     "folder_name": folder_name
                 }
-                
-                # Check the report checkbox if it exists
-                if report_id in report_checkboxes:
-                    report_checkboxes[report_id]["checkbox_var"].set(True)
             
             self._log(f"✅ Selected folder: {folder_name} ({len(reports)} reports)")
         else:
@@ -2041,27 +1446,23 @@ class SalesforceExporterApp(ctk.CTkToplevel):
             for report in reports:
                 report_id = report.get("id")
                 
-                # Remove from selected items
                 if report_id in self.selected_items:
                     del self.selected_items[report_id]
-                
-                # Uncheck the report checkbox if it exists
-                if report_id in report_checkboxes:
-                    report_checkboxes[report_id]["checkbox_var"].set(False)
             
             self._log(f"❌ Deselected folder: {folder_name}")
         
         # Update selected panel
         self._refresh_selected_panel()
-    
-    def _on_report_checkbox_changed(self, report_id: str, report_name: str, folder_id: str, checkbox_var: ctk.BooleanVar):
-        """Handle individual report checkbox change"""
-        
+
+    def _on_report_checkbox_changed_virtual(self, report_id: str, report_name: str, folder_id: str, checkbox_var: ctk.BooleanVar):
+        """
+        Handle individual report checkbox change from virtual tree.
+        ✅ NEW: Callback for virtual tree view.
+        """
         is_checked = checkbox_var.get()
         folder_name = self.tree_items.get(folder_id, {}).get("folder_name", "Unknown")
         
         if is_checked:
-            # Add to selected items
             self.selected_items[report_id] = {
                 "type": "report",
                 "name": report_name,
@@ -2070,16 +1471,139 @@ class SalesforceExporterApp(ctk.CTkToplevel):
             }
             self._log(f"✅ Selected: {report_name}")
         else:
-            # Remove from selected items
+            if report_id in self.selected_items:
+                del self.selected_items[report_id]
+            self._log(f"❌ Deselected: {report_name}")
+        
+        # Update selected panel
+        self._refresh_selected_panel()
+
+    def _on_folder_expand_virtual(self, folder_id: str):
+        """
+        Handle folder expand/collapse from virtual tree.
+        ✅ NEW: Callback for virtual tree view.
+        """
+        # Virtual tree handles the UI, we just log it
+        if folder_id in self.tree_items:
+            folder_name = self.tree_items[folder_id].get("folder_name", "Unknown")
+            is_expanded = self.virtual_tree and folder_id in self.virtual_tree.expanded_folders
+            
+            if is_expanded:
+                self._log(f"📂 Expanded: {folder_name}")
+            else:
+                self._log(f"📁 Collapsed: {folder_name}")
+        
+        
+    def _toggle_folder_expansion(self, folder_id: str):
+        """
+        Toggle folder expansion.
+        ✅ UPDATED: Now delegates to virtual tree view.
+        """
+        if not self.virtual_tree:
+            return
+        
+        # Virtual tree handles the UI
+        # This method kept for compatibility but does nothing
+        # The virtual tree's own expand handler is used instead
+        pass
+
+    def _sync_folder_checkboxes(self, folder_id: str):
+        """
+        Sync report checkboxes with actual selection state.
+        ✅ UPDATED: Works with virtual tree view.
+        """
+        if not self.virtual_tree:
+            return
+        
+        # Virtual tree will handle checkbox sync on next render
+        # Force re-render of visible items to update checkbox states
+        self.virtual_tree._render_visible_items()
+    
+    def _on_folder_checkbox_changed(self, folder_id: str, checkbox_var: ctk.BooleanVar):
+        """
+        Handle folder checkbox change - LEGACY METHOD.
+        ✅ UPDATED: Redirects to virtual tree handler if using virtual tree.
+        """
+        # If using virtual tree, redirect to new handler
+        if self.virtual_tree:
+            return self._on_folder_checkbox_changed_virtual(folder_id, checkbox_var)
+        
+        # Old implementation (kept for compatibility if virtual tree not initialized)
+        if folder_id not in self.tree_items:
+            self._log(f"ERROR: Folder {folder_id} not found in tree_items")
+            return
+        
+        is_checked = checkbox_var.get()
+        tree_item = self.tree_items[folder_id]
+        reports = tree_item.get("reports", [])
+        folder_name = tree_item.get("folder_name", "Unknown")
+        
+        if not reports:
+            self._log(f"⚠️ No reports in folder: {folder_name}")
+            checkbox_var.set(False)
+            return
+        
+        report_checkboxes = tree_item.get("report_checkboxes", {})
+        
+        if is_checked:
+            for report in reports:
+                report_id = report.get("id")
+                report_name = report.get("name", "Unnamed Report")
+                
+                self.selected_items[report_id] = {
+                    "type": "report",
+                    "name": report_name,
+                    "folder_id": folder_id,
+                    "folder_name": folder_name
+                }
+                
+                if report_id in report_checkboxes:
+                    report_checkboxes[report_id]["checkbox_var"].set(True)
+            
+            self._log(f"✅ Selected folder: {folder_name} ({len(reports)} reports)")
+        else:
+            for report in reports:
+                report_id = report.get("id")
+                
+                if report_id in self.selected_items:
+                    del self.selected_items[report_id]
+                
+                if report_id in report_checkboxes:
+                    report_checkboxes[report_id]["checkbox_var"].set(False)
+            
+            self._log(f"❌ Deselected folder: {folder_name}")
+        
+        self._refresh_selected_panel()
+    
+    def _on_report_checkbox_changed(self, report_id: str, report_name: str, folder_id: str, checkbox_var: ctk.BooleanVar):
+        """
+        Handle individual report checkbox change - LEGACY METHOD.
+        ✅ UPDATED: Redirects to virtual tree handler if using virtual tree.
+        """
+        # If using virtual tree, redirect to new handler
+        if self.virtual_tree:
+            return self._on_report_checkbox_changed_virtual(report_id, report_name, folder_id, checkbox_var)
+        
+        # Old implementation (kept for compatibility)
+        is_checked = checkbox_var.get()
+        folder_name = self.tree_items.get(folder_id, {}).get("folder_name", "Unknown")
+        
+        if is_checked:
+            self.selected_items[report_id] = {
+                "type": "report",
+                "name": report_name,
+                "folder_id": folder_id,
+                "folder_name": folder_name
+            }
+            self._log(f"✅ Selected: {report_name}")
+        else:
             if report_id in self.selected_items:
                 del self.selected_items[report_id]
             self._log(f"❌ Deselected: {report_name}")
             
-            # Uncheck folder checkbox if it was checked
             if folder_id in self.tree_items:
                 self.tree_items[folder_id]["checkbox_var"].set(False)
         
-        # Update selected panel
         self._refresh_selected_panel()
     
     def _on_left_search(self, event):
@@ -2230,21 +1754,23 @@ class SalesforceExporterApp(ctk.CTkToplevel):
         
         count = len(self.selected_items)
         
-        # Uncheck all checkboxes in tree
-        for item_id, item_data in list(self.selected_items.items()):
-            folder_id = item_data.get("folder_id")
-            
-            if folder_id in self.tree_items:
-                # Uncheck report checkbox
-                report_checkboxes = self.tree_items[folder_id].get("report_checkboxes", {})
-                if item_id in report_checkboxes:
-                    report_checkboxes[item_id]["checkbox_var"].set(False)
-                
-                # Uncheck folder checkbox
-                self.tree_items[folder_id]["checkbox_var"].set(False)
-        
-        # Clear selected items
+        # ✅ UPDATED: Clear selected items first
         self.selected_items.clear()
+        
+        # ✅ UPDATED: If using virtual tree, force re-render to update checkboxes
+        if self.virtual_tree:
+            self.virtual_tree._render_visible_items()
+        else:
+            # Old method: Uncheck all checkboxes in tree
+            for item_id, item_data in list(self.selected_items.items()):
+                folder_id = item_data.get("folder_id")
+                
+                if folder_id in self.tree_items:
+                    report_checkboxes = self.tree_items[folder_id].get("report_checkboxes", {})
+                    if item_id in report_checkboxes:
+                        report_checkboxes[item_id]["checkbox_var"].set(False)
+                    
+                    self.tree_items[folder_id]["checkbox_var"].set(False)
         
         self._log(f"🗑️ Cleared all selections ({count} reports)")
         
@@ -2958,7 +2484,22 @@ class SalesforceExporterApp(ctk.CTkToplevel):
             print(f"⚠️ UI state update error: {e}")
     
     # ===== QUEUE PROCESSING =====
-    
+    def destroy(self):
+        """
+        Clean up resources before window destruction.
+        ✅ NEW: Properly cleanup virtual tree.
+        """
+        try:
+            # Clean up virtual tree
+            if self.virtual_tree:
+                self.virtual_tree.clear()
+                self.virtual_tree = None
+        except:
+            pass
+        
+        # Call parent destroy
+        super().destroy()  
+
     def _process_queue(self):
         """Process updates from background threads"""
         try:
