@@ -947,28 +947,36 @@ class SalesforceExporterApp(ctk.CTkToplevel):
     # ===== LOGIN OPERATIONS =====
     
     def _logout(self):
-        """
-        Logout and return to login window.
-        
-        KEY FIX: Releases grab and lets parent handle window destruction.
-        """
+        """Logout and return to login window - WORKS DURING LOADING"""
         
         # Check if busy
         if self._is_ui_busy():
+            # ✅ Better message based on what's happening
+            if self.is_loading:
+                message = "Data is still loading. Cancel loading and logout?"
+            elif self.is_exporting:
+                message = "Export is in progress. Cancel export and logout?"
+            else:
+                message = "An operation is in progress. Cancel and logout?"
+            
             result = messagebox.askyesno(
                 "Operation in Progress",
-                "An operation is in progress. Cancel and logout?",
+                message,
                 icon='warning'
             )
+            
             if not result:
                 return
             
-            # Cancel operations
+            # ✅ Set cancel event to stop loading/exporting
+            self._log("🛑 Cancelling operations for logout...")
             self.export_cancel_event.set()
-            self.after(500, self._logout)  # Retry after cancellation
+            
+            # ✅ Give threads 500ms to see the cancel event, then force logout
+            self.after(500, self._force_logout_after_cancel)
             return
         
-        # Confirm logout
+        # Normal logout (no operations running)
         result = messagebox.askyesno(
             "Confirm Logout",
             "Are you sure you want to logout?\n\nYou will return to the login screen.",
@@ -980,26 +988,52 @@ class SalesforceExporterApp(ctk.CTkToplevel):
         
         self._log("🔴 Logging out...")
         
-        # ← KEY FIX: Release grab before calling parent callback
+        # Release grab before calling parent callback
         try:
             self.grab_release()
         except:
             pass
         
         # Call parent's logout handler
-        # Parent (AppLauncher) will destroy this window and show login
         if self.on_logout_callback:
             try:
                 self.on_logout_callback()
             except Exception as e:
                 print(f"⚠️ Error in logout callback: {e}")
-                # Fallback: destroy ourselves
                 try:
                     self.destroy()
                 except:
                     pass
         else:
-            # No callback provided - just destroy ourselves
+            try:
+                self.destroy()
+            except:
+                pass
+
+    def _force_logout_after_cancel(self):
+        """Force logout after cancelling operations"""
+        self._log("🔴 Logging out...")
+        
+        # Reset states
+        self._set_ui_state("idle")
+        self.is_loading = False
+        self.is_exporting = False
+        
+        try:
+            self.grab_release()
+        except:
+            pass
+        
+        if self.on_logout_callback:
+            try:
+                self.on_logout_callback()
+            except Exception as e:
+                print(f"⚠️ Error in logout callback: {e}")
+                try:
+                    self.destroy()
+                except:
+                    pass
+        else:
             try:
                 self.destroy()
             except:
@@ -1041,6 +1075,9 @@ class SalesforceExporterApp(ctk.CTkToplevel):
         # Set state
         self._set_ui_state("loading")
         
+        # ✅ CLEAR cancel event before starting
+        self.export_cancel_event.clear()
+        
         # Disable button and show loading
         self.all_folders_btn.configure(state="disabled", text="⏳ Loading...")
         
@@ -1078,22 +1115,37 @@ class SalesforceExporterApp(ctk.CTkToplevel):
         thread.start()
     
     def _load_data_worker(self):
-        """Background worker to load folders and reports with progress"""
+        """Background worker to load folders and reports with progress - CANCELLABLE"""
         try:
             session_id = self.session_info.get("session_id")
             instance_url = self.session_info.get("instance_url")
             
             exporter = SalesforceReportExporter(session_id, instance_url)
             
+            # ✅ CHECK: Was loading cancelled?
+            if self.export_cancel_event.is_set():
+                self.update_queue.put(("loading_cancelled", None))
+                return
+            
             # Step 1: Load folders
             self.update_queue.put(("loading_progress", (0.1, "Fetching folders...")))
             folders = exporter.list_report_folders()
             self.update_queue.put(("log", f"📁 Found {len(folders)} folders"))
             
+            # ✅ CHECK: Was loading cancelled?
+            if self.export_cancel_event.is_set():
+                self.update_queue.put(("loading_cancelled", None))
+                return
+            
             # Step 2: Load ALL reports (for total count)
             self.update_queue.put(("loading_progress", (0.2, "Fetching all reports...")))
             all_reports = exporter.list_reports()
             self.update_queue.put(("log", f"📄 Found {len(all_reports)} total reports"))
+            
+            # ✅ CHECK: Was loading cancelled?
+            if self.export_cancel_event.is_set():
+                self.update_queue.put(("loading_cancelled", None))
+                return
             
             # Step 3: For each folder, get reports with progress
             self.update_queue.put(("loading_progress", (0.3, "Loading reports by folder...")))
@@ -1102,6 +1154,11 @@ class SalesforceExporterApp(ctk.CTkToplevel):
             total_folders = len(folders)
             
             for idx, folder in enumerate(folders):
+                # ✅ CHECK: Was loading cancelled?
+                if self.export_cancel_event.is_set():
+                    self.update_queue.put(("loading_cancelled", None))
+                    return
+                
                 folder_id = folder.get("id")
                 folder_name = folder.get("name")
                 
@@ -1122,6 +1179,11 @@ class SalesforceExporterApp(ctk.CTkToplevel):
                     self.update_queue.put(("log", f"  ✗ Error loading '{folder_name}': {str(e)}"))
                     reports_by_folder_id[folder_id] = []
             
+            # ✅ CHECK: Was loading cancelled?
+            if self.export_cancel_event.is_set():
+                self.update_queue.put(("loading_cancelled", None))
+                return
+            
             # Final progress
             self.update_queue.put(("loading_progress", (0.9, "Preparing tree view...")))
             
@@ -1137,6 +1199,27 @@ class SalesforceExporterApp(ctk.CTkToplevel):
             error_details = traceback.format_exc()
             self.update_queue.put(("log", f"❌ ERROR: {error_details}"))
             self.update_queue.put(("data_error", str(e)))
+    def _on_loading_cancelled(self):
+        """Handle loading cancellation (user logged out during loading)"""
+        
+        # Clear loading indicator
+        for widget in self.tree_container.winfo_children():
+            widget.destroy()
+        
+        # Show cancellation message
+        placeholder = ctk.CTkLabel(
+            self.tree_container,
+            text="Loading cancelled",
+            text_color="gray",
+            font=ctk.CTkFont(size=12)
+        )
+        placeholder.grid(row=0, column=0, pady=30)
+        
+        # Reset UI state
+        self.all_folders_btn.configure(state="normal", text="📁 All Folders")
+        self._set_ui_state("idle")
+        
+        self._log("⚠️ Loading cancelled by user")
     
     def _on_loading_progress(self, progress_data):
         """Update loading progress in tree panel"""
@@ -2650,10 +2733,11 @@ class SalesforceExporterApp(ctk.CTkToplevel):
                         self._on_data_loaded(data)
                     elif event_type == "loading_progress":
                         self._on_loading_progress(data)
+                    elif event_type == "loading_cancelled":  # ✅ NEW
+                        self._on_loading_cancelled()
                     elif event_type == "data_error":
                         self._on_data_error(data)
                     elif event_type == "progress_with_name":
-                        # ✅ NEW: Handle progress update with report name
                         self._on_export_progress_with_name(data)
                     elif event_type == "progress":
                         self._on_export_progress(data)
