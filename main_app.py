@@ -625,70 +625,73 @@ class SalesforceExporterApp(ctk.CTkToplevel):
         self._create_right_panel(content_frame)
     
     def _create_left_panel(self, parent):
-        """Create left panel - Compact layout with fixed search"""
+        """Create left panel - Clean, compact layout with search button"""
         
         left_panel = ctk.CTkFrame(parent)
         left_panel.grid(row=0, column=0, sticky="nsew", padx=(10, 5), pady=10)
         
-        # KEY FIX: Row 3 gets weight 1 (expands). Others get weight 0 (fixed).
-        left_panel.grid_rowconfigure(0, weight=0) # Header
-        left_panel.grid_rowconfigure(1, weight=0) # Button
-        left_panel.grid_rowconfigure(2, weight=0) # Search
-        left_panel.grid_rowconfigure(3, weight=1) # Tree View (The big list)
+        # ✅ SIMPLIFIED: Only 2 rows now (search + tree)
+        left_panel.grid_rowconfigure(0, weight=0)  # Search section (fixed)
+        left_panel.grid_rowconfigure(1, weight=1)  # Tree view (expands)
         left_panel.grid_columnconfigure(0, weight=1)
         
-        # Header (Reduced padding)
+        # ========== ROW 0: Search Section ==========
+        search_container = ctk.CTkFrame(left_panel, fg_color="transparent")
+        search_container.grid(row=0, column=0, sticky="ew", padx=10, pady=(10, 10))
+        search_container.grid_columnconfigure(0, weight=1)
+        
+        # Header label (compact)
         header_label = ctk.CTkLabel(
-            left_panel,
-            text="Available Items",
-            font=ctk.CTkFont(size=16, weight="bold")
+            search_container,
+            text="Available Reports/Folders",
+            font=ctk.CTkFont(size=15, weight="bold"),
+            anchor="w"
         )
-        header_label.grid(row=0, column=0, sticky="w", padx=10, pady=(10, 5))
+        header_label.grid(row=0, column=0, sticky="w", pady=(0, 8))
         
-        # "All Folders" button (Reduced padding)
-        self.all_folders_btn = ctk.CTkButton(
-            left_panel,
-            text="📁 All Folders",
-            command=self._load_all_folders,
-            height=30,
-            fg_color="#1f6aa5",
-            hover_color="#144870",
-            state="disabled"
-        )
-        self.all_folders_btn.grid(row=1, column=0, sticky="ew", padx=10, pady=(0, 5))
+        # Search box + button in one row
+        search_frame = ctk.CTkFrame(search_container, fg_color="transparent")
+        search_frame.grid(row=1, column=0, sticky="ew")
+        search_frame.grid_columnconfigure(0, weight=1)  # Entry expands
+        search_frame.grid_columnconfigure(1, weight=0)  # Button fixed
         
-        # Search box (Fixed below button)
-        search_frame = ctk.CTkFrame(left_panel, fg_color="transparent")
-        search_frame.grid(row=2, column=0, sticky="ew", padx=10, pady=(0, 5))
-        search_frame.grid_columnconfigure(0, weight=1)
-        
+        # Search entry
         self.left_search_entry = ctk.CTkEntry(
             search_frame,
             placeholder_text="🔍 Search folders and reports...",
-            height=30
+            height=34
         )
-        self.left_search_entry.grid(row=0, column=0, sticky="ew")
-        self.left_search_entry.bind("<KeyRelease>", self._on_left_search)
+        self.left_search_entry.grid(row=0, column=0, sticky="ew", padx=(0, 8))
         
-        # ✅ NEW: Tree view container (This will now expand fully)
+        # Search button
+        self.search_button = ctk.CTkButton(
+            search_frame,
+            text="🔍 Search",
+            command=self._on_search_button_clicked,
+            width=95,
+            height=34,
+            fg_color="#1f6aa5",
+            hover_color="#144870",
+            font=ctk.CTkFont(size=12, weight="bold")
+        )
+        self.search_button.grid(row=0, column=1)
+        
+        # Bind Enter key to search
+        self.left_search_entry.bind("<Return>", lambda e: self._on_search_button_clicked())
+        
+        # ========== ROW 1: Tree View Container (expands fully) ==========
         self.tree_container = ctk.CTkScrollableFrame(
             left_panel,
             fg_color="#2b2b2b",
             corner_radius=5
         )
-        self.tree_container.grid(row=3, column=0, sticky="nsew", padx=10, pady=(0, 10))
+        self.tree_container.grid(row=1, column=0, sticky="nsew", padx=10, pady=(0, 10))
         self.tree_container.grid_columnconfigure(0, weight=1)
         
-        # Placeholder
-        self.tree_placeholder = ctk.CTkLabel(
-            self.tree_container,
-            text="Please login to load folders and reports",
-            text_color="gray",
-            font=ctk.CTkFont(size=11)
-        )
-        self.tree_placeholder.grid(row=0, column=0, pady=20)
+        # Show helpful empty state (no auto-load)
+        self._show_empty_search_state()
         
-        # ✅ NEW: Initialize virtual tree (will be set up after data loads)
+        # Initialize virtual tree (will be populated after search)
         self.virtual_tree = None
         self.tree_items: Dict[str, Dict] = {}
     
@@ -1031,7 +1034,10 @@ class SalesforceExporterApp(ctk.CTkToplevel):
     # ===== LOAD FOLDERS AND REPORTS =====
     
     def _auto_load_data_on_startup(self):
-        """Auto-load folders and reports when app starts (user is already logged in)"""
+        """
+        ✅ NEW: Don't auto-load anything on startup.
+        User must search to load data.
+        """
         if not self.session_info:
             self._log("⚠️ No session info available")
             return
@@ -1046,11 +1052,120 @@ class SalesforceExporterApp(ctk.CTkToplevel):
         if user_name:
             self._log(f"👤 User: {user_name}")
         
-        # Auto-load folders and reports
-        self._log("🔄 Loading report folders and reports...")
-        self._load_all_folders()
+        # ✅ NEW: Show helpful message instead of loading
+        self._log("🔍 Use the search box to find folders and reports")
+        self._log("💡 Tip: Try keywords like 'Sales', 'Account', 'Q4', etc.")
+        
+        # Show empty state in tree
+        self._show_empty_search_state()
     
+    def _show_empty_search_state(self):
+        """
+        Show helpful empty state when no search has been performed yet.
+        """
+        # Clear tree
+        for widget in self.tree_container.winfo_children():
+            widget.destroy()
+        
+        # Create empty state message
+        empty_frame = ctk.CTkFrame(self.tree_container, fg_color="transparent")
+        empty_frame.grid(row=0, column=0, pady=50)
+        
+        icon_label = ctk.CTkLabel(
+            empty_frame,
+            text="🔍",
+            font=ctk.CTkFont(size=48)
+        )
+        icon_label.pack(pady=(0, 10))
+        
+        title_label = ctk.CTkLabel(
+            empty_frame,
+            text="Search to Get Started",
+            font=ctk.CTkFont(size=16, weight="bold")
+        )
+        title_label.pack(pady=(0, 5))
+        
+        subtitle_label = ctk.CTkLabel(
+            empty_frame,
+            text="Enter keywords to search folders and reports\nExample: 'Sales', 'Account', 'Q4 2024'",
+            font=ctk.CTkFont(size=11),
+            text_color="gray",
+            justify="center"
+        )
+        subtitle_label.pack()
     
+    def _on_search_button_clicked(self):
+        """
+        Handle search button click.
+        Searches Salesforce for folders/reports matching keyword.
+        """
+        # Get search keyword
+        keyword = self.left_search_entry.get().strip()
+        
+        # Validate
+        if not keyword:
+            self._log("⚠️ Please enter a search keyword")
+            return
+        
+        if len(keyword) < 2:
+            self._log("⚠️ Search keyword must be at least 2 characters")
+            return
+        
+        # Check if already searching
+        if self.is_loading:
+            self._log("⚠️ Search already in progress, please wait...")
+            return
+        
+        # Start search
+        self._log(f"🔍 Searching for: '{keyword}'")
+        self._start_search(keyword)  
+        
+    def _start_search(self, keyword: str):
+        """
+        Start search in background thread.
+        Prevents UI freezing during search.
+        """
+        # Set loading state
+        self._set_ui_state("loading")
+        
+        # Clear cancel event
+        self.export_cancel_event.clear()
+        
+        # Disable search button and show loading
+        self.search_button.configure(state="disabled", text="🔄 Searching...")
+        self.left_search_entry.configure(state="disabled")
+        
+        # Show loading in tree
+        for widget in self.tree_container.winfo_children():
+            widget.destroy()
+        
+        loading_frame = ctk.CTkFrame(self.tree_container, fg_color="transparent")
+        loading_frame.grid(row=0, column=0, pady=30)
+        
+        loading_label = ctk.CTkLabel(
+            loading_frame,
+            text="🔄 Searching Salesforce...",
+            text_color="gray",
+            font=ctk.CTkFont(size=12, weight="bold")
+        )
+        loading_label.pack(pady=(0, 10))
+        
+        self.search_progress_label = ctk.CTkLabel(
+            loading_frame,
+            text=f"Looking for: '{keyword}'",
+            text_color="gray",
+            font=ctk.CTkFont(size=11)
+        )
+        self.search_progress_label.pack()
+        
+        # Start search in background thread
+        thread = threading.Thread(
+            target=self._search_worker,
+            args=(keyword,),
+            daemon=True
+        )
+        thread.start()
+  
     def _load_all_folders(self):
         """Load all folders and reports in background with progress"""
         if not self.session_info:
@@ -1068,7 +1183,7 @@ class SalesforceExporterApp(ctk.CTkToplevel):
         self.export_cancel_event.clear()
         
         # Disable button and show loading
-        self.all_folders_btn.configure(state="disabled", text="⏳ Loading...")
+        # self.all_folders_btn.configure(state="disabled", text="⏳ Loading...")
         
         # Show loading indicator in tree
         for widget in self.tree_container.winfo_children():
@@ -1188,6 +1303,7 @@ class SalesforceExporterApp(ctk.CTkToplevel):
             error_details = traceback.format_exc()
             self.update_queue.put(("log", f"❌ ERROR: {error_details}"))
             self.update_queue.put(("data_error", str(e)))
+    
     def _on_loading_cancelled(self):
         """Handle loading cancellation (user logged out during loading)"""
         
@@ -1205,7 +1321,7 @@ class SalesforceExporterApp(ctk.CTkToplevel):
         placeholder.grid(row=0, column=0, pady=30)
         
         # Reset UI state
-        self.all_folders_btn.configure(state="normal", text="📁 All Folders")
+        # self.all_folders_btn.configure(state="normal", text="📁 All Folders")
         self._set_ui_state("idle")
         
         self._log("⚠️ Loading cancelled by user")
@@ -1262,7 +1378,7 @@ class SalesforceExporterApp(ctk.CTkToplevel):
         self.after(100, lambda: self._populate_tree_with_data(filtered_folders, total_reports_in_folders))
         
         # Re-enable button
-        self.all_folders_btn.configure(state="normal", text="📁 All Folders")
+        # self.all_folders_btn.configure(state="normal", text="📁 All Folders")
         
         # Reset state
         self._set_ui_state("idle")
@@ -1299,7 +1415,7 @@ class SalesforceExporterApp(ctk.CTkToplevel):
         
     def _on_data_error(self, error: str):
         """Handle data loading error"""
-        self.all_folders_btn.configure(state="normal", text="📁 All Folders")
+        # self.all_folders_btn.configure(state="normal", text="📁 All Folders")
         self._log(f"❌ Error loading data: {error}")
         messagebox.showerror("Error", f"Failed to load folders and reports:\n\n{error}")
     
@@ -2461,7 +2577,7 @@ class SalesforceExporterApp(ctk.CTkToplevel):
         try:
             self.logout_button.configure(state=state)
             self.browse_button.configure(state=state)
-            self.all_folders_btn.configure(state=state)
+            # self.all_folders_btn.configure(state=state)
             self.filename_entry.configure(state=state)
             
             if enabled:
