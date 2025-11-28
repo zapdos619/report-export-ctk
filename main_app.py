@@ -251,34 +251,36 @@ class SalesforceExporterApp(ctk.CTkToplevel):
     Redesigned with folder/report tree view and dual-panel selection.
     """
     
-    def __init__(
-        self,
-        master,  # ← Required master parameter
-        session_info: Dict,
-        on_logout: Optional[Callable] = None
-    ):
-        # ← CHANGED: Pass master to Toplevel
+    def __init__(self, master, session_info: Dict, on_logout: Optional[Callable] = None):
+        """Initialize with improved state management"""
         super().__init__(master)
         
         # Store session info and logout callback
         self.session_info = session_info
         self.on_logout_callback = on_logout
         
-        # Window setup
-        self.title("Salesforce Report Exporter")
-        self.geometry("1200x800")
+        # ✅ CRITICAL: Initialize ALL state flags FIRST (before any other code runs)
+        # This prevents AttributeError when window configure events fire early
+        self.is_exporting = False  # ← MUST be initialized early
+        self.is_loading = False    # ← MUST be initialized early
+        self._export_state = "idle"  # ← NEW: Single state variable
+        self._showing_dialog = False  # ← Dialog flag
         
-        # ← NEW: Make this window modal-like (grab focus)
-        self.grab_set()
-        
-        # Set theme (already set in launcher, but doesn't hurt)
-        ctk.set_appearance_mode("dark")
-        ctk.set_default_color_theme("blue")
-        
-        # Thread Safety
+        # Thread Safety - Initialize locks early
         self.data_lock = threading.RLock()
         self.ui_lock = threading.RLock()
+        self.state_lock = threading.RLock()  # ← NEW: Dedicated state lock
+        
+        # Export control
         self.export_cancel_event = threading.Event()
+        
+        # Window setup (after basic state init)
+        self.title("Salesforce Report Exporter")
+        self.geometry("1200x800")
+        self.grab_set()
+        
+        ctk.set_appearance_mode("dark")
+        ctk.set_default_color_theme("blue")
         
         # UI State Management
         self.ui_state = "idle"
@@ -292,15 +294,18 @@ class SalesforceExporterApp(ctk.CTkToplevel):
         
         # Selection tracking
         self.selected_items: Dict[str, Dict] = {}
-        self.is_exporting: bool = False
-        self.is_loading: bool = False
-        self.search_timer = None 
+        self.search_timer = None
         
         # Progress tracker
         self.progress_tracker = ExportProgressTracker()
         
         # Queue for thread-safe UI updates
         self.update_queue = queue.Queue()
+        
+        # Window configuration tracking (initialize before binding)
+        self._configure_timer = None
+        self._last_window_geometry = None
+        self._last_export_state = None
         
         # Setup UI
         self._setup_ui()
@@ -315,18 +320,29 @@ class SalesforceExporterApp(ctk.CTkToplevel):
         self.protocol("WM_DELETE_WINDOW", self._on_closing)
         
         # Keyboard shortcuts
-        self.bind('<Control-e>', lambda e: self._start_export() if not self._is_ui_busy() else None)
-        self.bind('<Escape>', lambda e: self._cancel_export() if self.is_exporting else None)
+        self.unbind('<Control-e>')
+        self.unbind('<Escape>')
+        self.bind('<Control-e>', lambda e: self._start_export_safe())
+        self.bind('<Escape>', lambda e: self._cancel_export_safe())
         
-        # Window configuration tracking
+        # Window configuration tracking (bind AFTER attributes are initialized)
         self.bind('<Configure>', self._on_window_configure)
-        self._last_window_geometry = None
-        self._last_export_state = None
-        self._configure_timer = None
         
         # Auto-load data after UI is ready
         self.after(500, self._auto_load_data_on_startup)
+    
+    def _cancel_export_safe(self):
+        """
+        Safe wrapper for ESC key binding.
+        Only cancels if actually exporting.
+        """
+        export_state = self._get_export_state()
         
+        if export_state == "running":
+            self._cancel_export()
+        else:
+            print(f"ℹ️ ESC pressed but export state is '{export_state}' - ignoring")
+            
     def _setup_ui(self):
         """Setup the main UI layout"""
         
@@ -366,7 +382,45 @@ class SalesforceExporterApp(ctk.CTkToplevel):
         self.geometry(f'{width}x{height}+{x}+{y}')
     
     # ===== NEW: UI STATE MANAGEMENT METHODS =====
-    
+    # ✅ NEW: Atomic state management methods
+    def _get_export_state(self) -> str:
+        """Get current export state (thread-safe)"""
+        with self.state_lock:
+            return self._export_state
+        
+    def _set_export_state(self, new_state: str):
+        """
+        Set export state atomically (thread-safe).
+        Valid states: "idle", "running", "cancelling"
+        """
+        with self.state_lock:
+            old_state = self._export_state
+            self._export_state = new_state
+            
+            # Auto-sync is_exporting for backward compatibility
+            self.is_exporting = (new_state in ("running", "cancelling"))
+            
+            # Log state transitions for debugging
+            if old_state != new_state:
+                print(f"🔄 Export state: {old_state} → {new_state}")
+
+
+    def _is_export_busy(self) -> bool:
+        """Check if export is currently running or cancelling"""
+        state = self._get_export_state()
+        return state in ("running", "cancelling")
+
+
+    def _reset_export_state(self):
+        """Reset export state to idle and clear all flags"""
+        with self.state_lock:
+            self._export_state = "idle"
+            self.is_exporting = False
+            self._showing_dialog = False
+            self.export_cancel_event.clear()
+            
+            print("🔄 Export state reset to IDLE")        
+        
     def _set_ui_state(self, state: str):
         """
         Set UI state and update UI accordingly.
@@ -396,24 +450,31 @@ class SalesforceExporterApp(ctk.CTkToplevel):
         """
         Execute UI update safely on main thread.
         Prevents race conditions and ensures thread safety.
+        
+        IMPROVED: Better error handling and thread detection.
         """
         def wrapper():
-            with self.ui_lock:
-                try:
-                    callback(*args, **kwargs)
-                except Exception as e:
-                    self._log(f"⚠️ UI update error: {str(e)}")
+            try:
+                callback(*args, **kwargs)
+            except Exception as e:
+                print(f"⚠️ UI update error in callback: {str(e)}")
         
-        # If we're on main thread, execute immediately
+        # Check if we're on main thread
         try:
+            import threading
             if threading.current_thread() is threading.main_thread():
+                # Already on main thread - execute immediately
                 wrapper()
             else:
                 # Schedule on main thread
                 self.after(0, wrapper)
-        except:
-            # Fallback: use queue
-            self.update_queue.put(("ui_update", (callback, args, kwargs)))
+        except Exception:
+            # Fallback: always schedule
+            try:
+                self.after(0, wrapper)
+            except:
+                # Last resort: use queue
+                self.update_queue.put(("ui_update", (callback, args, kwargs)))
     
     def _prevent_double_click(self, button: ctk.CTkButton, duration: float = 2.0):
         """
@@ -487,80 +548,120 @@ class SalesforceExporterApp(ctk.CTkToplevel):
         """
         Handle window move/resize events with debouncing.
         Fixes button visibility issues when moving between monitors.
+        
+        IMPROVED: Better debouncing with adaptive delays and safety checks.
         """
         # Only process events for the main window (not child widgets)
         if event and event.widget != self:
             return
         
-        # ✅ FIX 1: Cancel any pending configure updates (debouncing)
-        if hasattr(self, '_configure_timer') and self._configure_timer:
-            self.after_cancel(self._configure_timer)
+        # ✅ SAFETY: Check if attributes exist (early window events can fire before init completes)
+        if not hasattr(self, 'is_exporting') or not hasattr(self, '_configure_timer'):
+            return
         
-        # ✅ FIX 2: Schedule update after window settles (300ms delay)
-        self._configure_timer = self.after(300, self._apply_window_configure)
+        # ✅ Cancel any pending configure updates (debouncing)
+        if self._configure_timer:
+            try:
+                self.after_cancel(self._configure_timer)
+            except:
+                pass
+        
+        # ✅ Adaptive delay based on current state
+        try:
+            with self.ui_lock:
+                delay = 400 if self.is_exporting else 100
+        except:
+            delay = 100  # Fallback if lock fails
+        
+        self._configure_timer = self.after(delay, self._apply_window_configure)
 
     def _apply_window_configure(self):
         """
         Apply window configuration changes after debounce delay.
-        Only updates UI if state actually changed.
+        
+        IMPROVED: Simplified with better error handling.
         """
         try:
-            # Get current geometry
-            current_geometry = self.geometry()
-            
-            # ✅ FIX 3: Only compare size, not position (ignore x,y coordinates)
-            # Format: "WIDTHxHEIGHT+X+Y" -> extract "WIDTHxHEIGHT"
-            current_size = current_geometry.split('+')[0] if '+' in current_geometry else current_geometry
-            last_size = self._last_window_geometry.split('+')[0] if hasattr(self, '_last_window_geometry') and self._last_window_geometry and '+' in self._last_window_geometry else None
-            
-            # Only act if SIZE actually changed (ignore position changes)
-            if current_size == last_size:
+            # ✅ SAFETY: Check attributes exist
+            if not hasattr(self, 'is_exporting'):
                 return
             
-            self._last_window_geometry = current_geometry
-            
-            # ✅ FIX 4: Only update button visibility if export state changed
-            with self.ui_lock:
-                current_export_state = self.is_exporting
-            
-            # Check if we need to update buttons at all
-            if not hasattr(self, '_last_export_state'):
-                self._last_export_state = None
-            
-            # Only update if export state changed OR first run
-            if current_export_state == self._last_export_state:
-                return  # State unchanged, no need to update buttons
-            
-            self._last_export_state = current_export_state
-            
-            # Now update button visibility based on state
-            if current_export_state:
-                # Should show CANCEL button only
-                self.export_button.grid_remove()
-                self.cancel_button.grid()
-                if self.cancel_button.cget("state") == "disabled":
-                    self.cancel_button.configure(text="🛑 Cancelling...")
-                else:
-                    self.cancel_button.configure(text="🛑 Cancel Export")
-            else:
-                # Should show EXPORT button only
-                self.cancel_button.grid_remove()
-                self.cancel_button.configure(state="disabled")
-                self.export_button.grid()
-                
-                # Update export button state
-                self._update_export_button_state()
-            
-            # Force UI refresh
-            self.update_idletasks()
+            # Refresh buttons with current state
+            self._refresh_button_visibility()
             
         except Exception as e:
-            # Silently ignore errors during configure (window might be closing)
-            pass
+            # Log errors for debugging
+            try:
+                print(f"⚠️ Window configure error: {e}")
+            except:
+                pass
         finally:
             # Clear timer reference
-            if hasattr(self, '_configure_timer'):
-                self._configure_timer = None
+            self._configure_timer = None
+
+
+    def _refresh_button_visibility(self):
+        """
+        Refresh export/cancel button visibility based on ACTUAL current state.
+        
+        This is the SINGLE SOURCE OF TRUTH for button visibility.
+        Thread-safe and handles all edge cases.
+        
+        IMPROVED: Uses atomic state management to prevent race conditions.
+        """
+        # ✅ CRITICAL: Read state atomically
+        export_state = self._get_export_state()
+        is_cancelling = self.export_cancel_event.is_set()
+        
+        # Debug logging
+        print(f"🔄 Refreshing buttons: state={export_state}, cancelling={is_cancelling}")
+        
+        try:
+            if export_state == "running":
+                # ===== EXPORTING: Show CANCEL button =====
+                
+                if is_cancelling:
+                    # User clicked cancel - button should be disabled
+                    self.cancel_button.configure(
+                        state="disabled",
+                        text="🛑 Cancelling..."
+                    )
+                else:
+                    # Export is running - button should be ENABLED and clickable
+                    self.cancel_button.configure(
+                        state="normal",
+                        text="🛑 Cancel Export"
+                    )
+                
+                # Show cancel button
+                self.cancel_button.grid(row=2, column=0, sticky="ew", padx=10, pady=(0, 5))
+                self.cancel_button.lift()
+                
+                # Hide export button
+                self.export_button.grid_remove()
+                
+            else:
+                # ===== IDLE or CANCELLING: Show EXPORT button =====
+                
+                # Show export button FIRST (no gap)
+                self.export_button.grid(row=2, column=0, sticky="ew", padx=10, pady=(0, 5))
+                self.export_button.lift()
+                
+                # Hide cancel button
+                self.cancel_button.grid_remove()
+                self.cancel_button.configure(state="disabled", text="🛑 Cancel Export")
+                self.cancel_button.lower()
+                
+                # Update export button enabled/disabled state
+                self._update_export_button_state()
+            
+            # Force UI update
+            self.update_idletasks()
+            
+            print(f"✅ Buttons refreshed successfully")
+            
+        except Exception as e:
+            print(f"⚠️ Button visibility error: {e}")
             
     def _create_header(self):
         """Create header section with title and login status"""
@@ -843,7 +944,7 @@ class SalesforceExporterApp(ctk.CTkToplevel):
         self.export_button = ctk.CTkButton(
             bottom_frame,
             text="🚀 Export Reports",
-            command=self._start_export,
+            command=self._start_export_safe,  # ← Use safe wrapper
             height=45,
             font=ctk.CTkFont(size=15, weight="bold"),
             fg_color="#1f6aa5",
@@ -2199,24 +2300,27 @@ class SalesforceExporterApp(ctk.CTkToplevel):
             self._update_export_button_state()
     
     def _update_export_button_state(self):
-        """Enable/disable export button based on conditions"""
+        """
+        Enable/disable export button based on conditions.
         
-        # Check all conditions
+        IMPROVED: Uses atomic state checks and better error handling.
+        """
+        # ✅ IMPROVED: Atomic state checks
         with self.data_lock:
             has_session = self.session_info is not None
             has_path = self.output_zip_path is not None
             has_selection = len(self.selected_items) > 0
         
-        with self.ui_lock:
-            is_busy = self.is_exporting or self.is_loading
-            ui_state = self.ui_state
+        # ✅ IMPROVED: Use atomic state getter
+        export_state = self._get_export_state()
+        is_busy = self._is_ui_busy() or self._is_export_busy()
         
-        # Debug logging (keep for now, can remove later)
+        # Debug logging
         print(f"🔍 Export Button State Check:")
         print(f"   Session: {has_session}")
         print(f"   Path: {has_path}")
         print(f"   Selection: {has_selection} ({len(self.selected_items)} items)")
-        print(f"   UI State: {ui_state}")
+        print(f"   Export State: {export_state}")
         print(f"   Busy: {is_busy}")
         
         # Can only export if ALL conditions met AND not busy
@@ -2224,9 +2328,17 @@ class SalesforceExporterApp(ctk.CTkToplevel):
         
         print(f"   ✅ Can Export: {can_export}")
         
-        # Update button state - use after() to ensure main thread
+        # Update button state on main thread
         def update_btn():
             try:
+                # ✅ SAFETY: Double-check state hasn't changed
+                current_state = self._get_export_state()
+                if current_state != "idle":
+                    # State changed while scheduling - button should stay disabled
+                    self.export_button.configure(state="disabled")
+                    print(f"   🔴 Export button DISABLED (state changed to {current_state})")
+                    return
+                
                 if can_export:
                     self.export_button.configure(state="normal")
                     print(f"   🟢 Export button ENABLED")
@@ -2237,22 +2349,29 @@ class SalesforceExporterApp(ctk.CTkToplevel):
                 print(f"   ⚠️ Button update error: {e}")
         
         # Execute on main thread
-        try:
-            if threading.current_thread() is threading.main_thread():
-                update_btn()
-            else:
-                self.after(0, update_btn)
-        except:
-            self.after(0, update_btn)
+        self._safe_ui_update(update_btn)
         
     # ===== EXPORT OPERATIONS =====
     
     def _cancel_export(self):
-        """Cancel the ongoing export operation"""
+        """
+        Cancel the ongoing export operation.
         
-        if not self.is_exporting:
+        IMPROVED: Proper state transition with atomic operations.
+        """
+        # ✅ IMPROVED: Check actual state
+        export_state = self._get_export_state()
+        
+        if export_state != "running":
+            print(f"⚠️ Cannot cancel - export state is '{export_state}'")
             return
         
+        # ✅ IMPROVED: Check if already cancelling
+        if self.export_cancel_event.is_set():
+            print("⚠️ Export already cancelling")
+            return
+        
+        # Show confirmation dialog
         result = messagebox.askyesno(
             "Cancel Export",
             "Cancel the export?\n\n"
@@ -2260,33 +2379,69 @@ class SalesforceExporterApp(ctk.CTkToplevel):
             icon='warning'
         )
         
-        if result:
-            self._log("🛑 Cancelling export...")
-            self.export_cancel_event.set()
-            
-            # Update UI
-            self.cancel_button.configure(state="disabled", text="🛑 Cancelling...")
-            self.progress_label.configure(text="Cancelling export...", text_color="orange")
+        if not result:
+            print("ℹ️ Cancel operation aborted by user")
+            return
+        
+        # ✅ CRITICAL: Transition to "cancelling" state atomically
+        self._set_export_state("cancelling")
+        
+        # Set cancel event (background thread will see this)
+        self.export_cancel_event.set()
+        
+        self._log("🛑 Cancelling export...")
+        
+        # ✅ Update button to show "Cancelling..." state
+        self._refresh_button_visibility()
+        
+        self.progress_label.configure(text="Cancelling export...", text_color="orange")
+        
+        print("✅ Cancel event set - background thread will stop gracefully")
     
     
     def _start_export(self):
-        """Start the export process"""
+        """
+        Start the export process.
         
+        IMPROVED: Proper state management with atomic transitions.
+        """
+        # ✅ GUARD: Set dialog flag atomically
+        with self.state_lock:
+            if self._showing_dialog:
+                print("⚠️ Dialog already showing")
+                return
+            
+            if self._is_export_busy():
+                print("⚠️ Export already busy")
+                return
+            
+            # Mark that we're showing dialog
+            self._showing_dialog = True
+        
+        # Validation checks
         if not self.session_info:
+            with self.state_lock:
+                self._showing_dialog = False
             messagebox.showwarning("Not Logged In", "Please login first.")
             return
         
         if not self.output_zip_path:
+            with self.state_lock:
+                self._showing_dialog = False
             messagebox.showwarning("No Location", "Please select a save location.")
             return
         
         if not self.selected_items:
+            with self.state_lock:
+                self._showing_dialog = False
             messagebox.showwarning("No Selection", "Please select at least one report to export.")
             return
         
         # Get filename from entry
         filename = self.filename_entry.get().strip()
         if not filename:
+            with self.state_lock:
+                self._showing_dialog = False
             messagebox.showwarning("No Filename", "Please enter a filename.")
             return
         
@@ -2304,11 +2459,21 @@ class SalesforceExporterApp(ctk.CTkToplevel):
             f"Export {count} report(s) to:\n\n{self.output_zip_path}\n\nContinue?"
         )
         
+        # ✅ CRITICAL: Clear dialog flag before checking result
+        with self.state_lock:
+            self._showing_dialog = False
+        
         if not result:
+            print("ℹ️ Export cancelled by user (dialog)")
             return
         
-        # Start export
-        self.is_exporting = True
+        # ✅ CRITICAL: Transition to "running" state atomically
+        self._set_export_state("running")
+        
+        # Clear cancel event (fresh start)
+        self.export_cancel_event.clear()
+        
+        # Update UI
         self._set_export_ui_state(False)
         
         self._log(f"🚀 Starting export of {count} selected reports...")
@@ -2317,29 +2482,49 @@ class SalesforceExporterApp(ctk.CTkToplevel):
         # Get list of report IDs
         report_ids = list(self.selected_items.keys())
         
-        # Clear cancel event
-        self.export_cancel_event.clear()
-        
         # Initialize progress tracker
         self.progress_tracker.start(len(report_ids))
         
-        # Show cancel button, hide export button
-        self.export_button.grid_remove()
-        self.cancel_button.grid()
-        self.cancel_button.configure(state="normal", text="🛑 Cancel Export")
-        self.cancel_button.lift()  # ✅ NEW: Bring cancel button to front
+        # ✅ Update buttons to show cancel button
+        self._refresh_button_visibility()
         
-        # ✅ Force update to ensure proper visibility
+        # Force update
         self.update_idletasks()
         
-        # Start export in background
+        # ✅ Start export in BACKGROUND THREAD (UI stays responsive)
         thread = threading.Thread(
             target=self._export_worker,
             args=(report_ids,),
             daemon=True
         )
         thread.start()
-    
+        
+        print("✅ Export thread started")
+
+    def _start_export_safe(self):
+        """
+        Safe wrapper for _start_export() to prevent double-triggering.
+        Called by keyboard shortcuts and button clicks.
+        
+        IMPROVED: Uses atomic state checks.
+        """
+        # ✅ IMPROVED: Check if already busy or showing dialog
+        if self._is_export_busy():
+            print("⚠️ Export already running, ignoring duplicate trigger")
+            return
+        
+        if self._is_ui_busy():
+            print("⚠️ UI is busy, ignoring export trigger")
+            return
+        
+        with self.state_lock:
+            if self._showing_dialog:
+                print("⚠️ Dialog already open, ignoring export trigger")
+                return
+        
+        # All checks passed - proceed with export
+        self._start_export()
+        
     def _export_worker(self, report_ids: List[str]):
         """Background worker for export with concurrent downloads"""
         try:
@@ -2440,13 +2625,31 @@ class SalesforceExporterApp(ctk.CTkToplevel):
             )
     
     def _on_export_complete(self, result: Dict):
-        """Handle export completion (including cancellation)"""
-        import subprocess
-        import platform
+        """
+        Handle export completion (including cancellation).
         
-        self.is_exporting = False
-        self._set_export_ui_state(True)
+        IMPROVED: Proper state cleanup with atomic transitions.
+        """
+        print("📥 Export completion handler called")
         
+        # ✅ GUARD: Prevent multiple completion handlers
+        with self.state_lock:
+            current_state = self._get_export_state()
+            
+            if self._showing_dialog:
+                # Already showing completion dialog, ignore duplicate calls
+                print("⚠️ Completion dialog already showing, ignoring duplicate call")
+                return
+            
+            if current_state == "idle":
+                # Already handled completion, ignore
+                print("⚠️ Export already completed, ignoring duplicate call")
+                return
+            
+            # Mark that we're showing dialog
+            self._showing_dialog = True
+        
+        # Extract result data
         total = result.get("total", 0)
         failed = result.get("failed", [])
         successful = result.get("successful", [])
@@ -2454,24 +2657,11 @@ class SalesforceExporterApp(ctk.CTkToplevel):
         was_cancelled = result.get("cancelled", False)
         completed = result.get("completed", len(successful))
         
-        # Hide cancel button, show export button properly
-        self.cancel_button.grid_remove()
-        self.cancel_button.configure(state="disabled")
-        self.cancel_button.lower()
-        
-        self.export_button.grid()
-        self.export_button.lift()
-        
-        # Update button state based on conditions
-        self._update_export_button_state()
-        
-        # Force UI update
-        self.update_idletasks()
-        
         # Update progress with statistics
         elapsed = self.progress_tracker.get_elapsed_seconds()
         elapsed_formatted = self.progress_tracker.format_time(elapsed)
         
+        # Update progress bar and label
         if was_cancelled:
             progress_value = completed / total if total > 0 else 0
             self.progress_bar.set(progress_value)
@@ -2525,15 +2715,39 @@ class SalesforceExporterApp(ctk.CTkToplevel):
             if len(failed) > 5:
                 self._log(f"  ... and {len(failed) - 5} more (see summary file)")
         
-        # ✅ FIX: Handle cancellation vs completion separately
+        # ✅ CRITICAL: Reset export state BEFORE showing dialogs
+        # This ensures buttons work correctly even if user cancels dialog
+        self._reset_export_state()
+        
+        # ✅ Update UI state
+        self._set_export_ui_state(True)
+        
+        # ✅ Refresh button visibility
+        self._refresh_button_visibility()
+        
+        # Force UI update
+        self.update_idletasks()
+        
+        print("✅ Export state reset to IDLE, showing user dialog...")
+        
+        # ✅ Handle cancellation vs completion separately
         if was_cancelled:
             self._handle_cancelled_export(completed, total, successful, failed, elapsed_formatted, avg_speed, zip_path)
         else:
             self._handle_successful_export(total, successful, failed, elapsed_formatted, avg_speed, zip_path)
+        
+        # ✅ CRITICAL: Clear dialog flag after user interaction
+        with self.state_lock:
+            self._showing_dialog = False
+        
+        print("✅ Completion handler finished")
     
     def _handle_cancelled_export(self, completed, total, successful, failed, elapsed_formatted, avg_speed, zip_path):
-        """Handle UI flow when export was cancelled"""
+        """
+        Handle UI flow when export was cancelled.
         
+        IMPROVED: Better dialog management and state handling.
+        """
         # Build cancellation message
         message = f"Export was cancelled.\n\n"
         message += f"📊 Statistics:\n"
@@ -2567,10 +2781,17 @@ class SalesforceExporterApp(ctk.CTkToplevel):
             self._ask_open_folder(zip_path)
         
         # If None (Cancel button), do nothing - just keep the file
+        print("✅ Cancelled export handler finished")
+
+
+        # If None (Cancel button), do nothing - just keep the file
     
     def _handle_successful_export(self, total, successful, failed, elapsed_formatted, avg_speed, zip_path):
-        """Handle UI flow when export completed successfully"""
+        """
+        Handle UI flow when export completed successfully.
         
+        IMPROVED: Cleaner dialog flow.
+        """
         success_rate = (len(successful) / total * 100) if total > 0 else 0
         
         # Build success message
@@ -2590,9 +2811,16 @@ class SalesforceExporterApp(ctk.CTkToplevel):
         
         # Ask about opening folder
         self._ask_open_folder(zip_path)
+        
+        print("✅ Successful export handler finished")
+
     
     def _ask_open_folder(self, zip_path):
-        """Ask user if they want to open the folder containing the export"""
+        """
+        Ask user if they want to open the folder containing the export.
+        
+        IMPROVED: Better error handling.
+        """
         import subprocess
         import platform
         import os
@@ -2620,22 +2848,19 @@ class SalesforceExporterApp(ctk.CTkToplevel):
                 messagebox.showerror("Error", f"Could not open folder:\n{str(e)}")
     
     def _on_export_error(self, error_msg: str):
-        """Handle export error with helpful messages"""
-        self.is_exporting = False
+        """
+        Handle export error with proper state cleanup.
+        
+        IMPROVED: Ensures state is reset even on errors.
+        """
+        print(f"❌ Export error handler called: {error_msg}")
+        
+        # ✅ CRITICAL: Reset state immediately
+        self._reset_export_state()
+        
+        # Update UI
         self._set_export_ui_state(True)
-        
-        # Hide cancel button, show export button properly
-        self.cancel_button.grid_remove()
-        self.cancel_button.configure(state="disabled")
-        self.cancel_button.lower()  # ✅ NEW: Push cancel button to back
-        
-        self.export_button.grid()
-        self.export_button.lift()  # ✅ NEW: Bring export button to front
-        
-        # Update button state based on conditions
-        self._update_export_button_state()
-        
-        # Force UI update
+        self._refresh_button_visibility()
         self.update_idletasks()
         
         self.progress_bar.set(0)
@@ -2658,10 +2883,24 @@ class SalesforceExporterApp(ctk.CTkToplevel):
         # Provide helpful error message
         helpful_msg = self._get_helpful_error_message(error_msg)
         
-        messagebox.showerror(
-            "Export Failed",
-            f"Export failed:\n\n{error_msg}\n\n{helpful_msg}"
-        )
+        # ✅ GUARD: Check if already showing dialog
+        with self.state_lock:
+            if self._showing_dialog:
+                print("⚠️ Error dialog already showing")
+                return
+            self._showing_dialog = True
+        
+        try:
+            messagebox.showerror(
+                "Export Failed",
+                f"Export failed:\n\n{error_msg}\n\n{helpful_msg}"
+            )
+        finally:
+            # ✅ CRITICAL: Clear dialog flag
+            with self.state_lock:
+                self._showing_dialog = False
+        
+        print("✅ Error handler finished")
     
     def _get_helpful_error_message(self, error_msg: str) -> str:
         """Get helpful suggestion based on error message"""
@@ -2686,37 +2925,37 @@ class SalesforceExporterApp(ctk.CTkToplevel):
             return "💡 Suggestion: Try exporting fewer reports at once, or check the activity log for more details."
     
     def _set_export_ui_state(self, enabled: bool):
-        """Enable/disable UI during export"""
+        """
+        Enable/disable UI during export.
+        
+        IMPROVED: Uses atomic state management and better button handling.
+        """
         state = "normal" if enabled else "disabled"
         
-        self.logout_button.configure(state=state)
-        self.browse_button.configure(state=state)
-        self.all_folders_btn.configure(state=state)
-        self.filename_entry.configure(state=state)
-        
-        if enabled:
-            # Export finished - restore normal UI
-            self.filename_entry.configure(state="normal")
+        try:
+            self.logout_button.configure(state=state)
+            self.browse_button.configure(state=state)
+            self.all_folders_btn.configure(state=state)
+            self.filename_entry.configure(state=state)
             
-            # ✅ CRITICAL: Properly restore button visibility
-            self.cancel_button.grid_remove()
-            self.cancel_button.configure(state="disabled")
-            self.cancel_button.lower()  # ✅ NEW: Push to back
+            if enabled:
+                # ✅ Export finished - restore normal UI
+                self.filename_entry.configure(state="normal")
+                
+                # ✅ CRITICAL: Use centralized button refresh
+                self._refresh_button_visibility()
+                
+            else:
+                # ✅ Export starting - disable everything
+                self.filename_entry.configure(state="disabled")
+                
+                # Buttons handled by _refresh_button_visibility()
             
-            self.export_button.grid()
-            self.export_button.lift()  # ✅ NEW: Bring to front
-            
-            # Update export button state based on current conditions
-            self._update_export_button_state()
-            
-            # Force UI refresh
+            # Force UI update
             self.update_idletasks()
-        else:
-            # Export starting - disable everything
-            self.filename_entry.configure(state="disabled")
-            self.export_button.configure(state="disabled")
             
-            # Don't touch cancel button here - handled in _start_export()
+        except Exception as e:
+            print(f"⚠️ UI state update error: {e}")
     
     # ===== QUEUE PROCESSING =====
     
