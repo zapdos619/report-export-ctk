@@ -935,16 +935,15 @@ class SalesforceReportExporter:
                 report_name = report.get("name") or report_id
                 report_type = report.get("reportFormat", "TABULAR")
                 
-                # ✅ NEW: Notify UI that we're starting this report
+                # ✅ NOTIFY: Starting download of this report
                 if self.progress_callback:
                     try:
-                        # Send special progress update with report name
-                        # Format: (current_count, total_count, report_name)
                         with completed_lock:
                             current_count = completed
+                        # Signal: download starting (with report name)
                         self.progress_callback(current_count, len(reports), report_name)
                     except:
-                        pass  # Ignore errors in callback
+                        pass
                 
                 # Generate filename
                 base_name = safe_filename(report_name)
@@ -985,14 +984,15 @@ class SalesforceReportExporter:
                         
                         csv_path.write_text(csv_content, encoding="utf-8")
                         
-                        # Success!
+                        # Success! Increment counter FIRST
                         with completed_lock:
                             completed += 1
+                            current_count = completed
                         
-                        # ✅ NEW: Notify UI that this report completed
+                        # ✅ NOTIFY: Report completed successfully
                         if self.progress_callback:
                             try:
-                                # Send progress update without report name (completed)
+                                # Send progress update (completed count increased)
                                 self.progress_callback(current_count, len(reports))
                             except:
                                 pass
@@ -1018,10 +1018,19 @@ class SalesforceReportExporter:
                     f"# Error: {last_error}\n"
                 )
                 csv_path.write_text(error_content, encoding="utf-8")
-                
+
+                # Increment counter FIRST
                 with completed_lock:
                     completed += 1
-                
+                    current_count = completed
+
+                # ✅ NOTIFY: Report failed (but counted as completed)
+                if self.progress_callback:
+                    try:
+                        self.progress_callback(current_count, len(reports))
+                    except:
+                        pass
+
                 return ("failed", report, last_error)
             
             # Export reports concurrently

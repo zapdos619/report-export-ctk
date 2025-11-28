@@ -2348,35 +2348,32 @@ class SalesforceExporterApp(ctk.CTkToplevel):
             
             def progress_callback(done, total, report_name=None):
                 """
-                ✅ FIX: Real-time progress updates with report names
+                Progress callback - called when report starts/completes
                 Args:
                     done: Number of reports completed
                     total: Total reports to export
                     report_name: Optional name of report being downloaded
                 """
-                # If report_name provided, it means download is STARTING
+                # If report_name provided, download is STARTING
                 if report_name:
-                    # Send special progress update with report name
+                    # Update UI with current report name
                     self.update_queue.put(("progress_with_name", (done, total, report_name)))
+                    # Log start
+                    self.update_queue.put(("log", f"  📥 Downloading: {report_name}"))
                     return
                 
-                # Otherwise, normal progress update (report COMPLETED)
+                # Report COMPLETED - update progress
                 self.update_queue.put(("progress", (done, total)))
                 
-                # ✅ Log every report download immediately
+                # Log completion immediately
                 if done > 0 and done <= total:
                     percentage = int((done / total) * 100)
+                    speed = self.progress_tracker.get_speed()
                     
-                    # Show speed after first few reports
-                    if done > 2:
-                        speed = self.progress_tracker.get_speed()
-                        if speed > 0.1:  # Only show speed if meaningful
-                            self.update_queue.put(("log", f"  ✓ Report {done}/{total} ({percentage}%) • {speed:.1f}/sec"))
-                        else:
-                            self.update_queue.put(("log", f"  ✓ Report {done}/{total} ({percentage}%)"))
+                    if speed > 0.5:  # Show speed if meaningful
+                        self.update_queue.put(("log", f"  ✅ Completed: {done}/{total} ({percentage}%) • {speed:.1f} reports/sec"))
                     else:
-                        # First few reports - don't show speed yet
-                        self.update_queue.put(("log", f"  ✓ Report {done}/{total} ({percentage}%)"))
+                        self.update_queue.put(("log", f"  ✅ Completed: {done}/{total} ({percentage}%)"))
             
             exporter = SalesforceReportExporter(
                 session_id,
@@ -2402,31 +2399,14 @@ class SalesforceExporterApp(ctk.CTkToplevel):
             self.update_queue.put(("export_error", str(e)))
     
     def _on_export_progress(self, progress_data):
-        """Handle export progress update with ETA and speed"""
+        """Handle export progress update - updates after EACH report"""
         done, total = progress_data
         
-        # ✅ FIX: Throttle UI updates to prevent freezing
-        current_time = time.time()
-        
-        # Initialize throttle timer on first call
-        if not hasattr(self, '_last_progress_ui_update'):
-            self._last_progress_ui_update = 0
-        
-        # Calculate time since last UI update
-        time_since_last_update = current_time - self._last_progress_ui_update
-        
-        # ✅ SMART THROTTLING: Always update first and last, throttle middle
-        should_update_ui = (
-            done == 1 or                          # Always update first report
-            done == total or                       # Always update last report
-            time_since_last_update >= 0.5          # Throttle to max 2 updates/sec
-        )
-        
-        # Always update the tracker (for speed calculations)
+        # Always update tracker (for speed calculations)
         self.progress_tracker.update(done)
         
-        # Only update UI widgets if throttle allows
-        if should_update_ui and total > 0:
+        # Update UI for EVERY report
+        if total > 0:
             progress = done / total
             self.progress_bar.set(progress)
             
@@ -2436,9 +2416,6 @@ class SalesforceExporterApp(ctk.CTkToplevel):
                 text=progress_text,
                 text_color="#1f6aa5"
             )
-            
-            # Update throttle timer
-            self._last_progress_ui_update = current_time
     
     
     def _on_export_progress_with_name(self, progress_data):
@@ -2492,12 +2469,12 @@ class SalesforceExporterApp(ctk.CTkToplevel):
         self.update_idletasks()
         
         # Update progress with statistics
+        elapsed = self.progress_tracker.get_elapsed_seconds()
+        elapsed_formatted = self.progress_tracker.format_time(elapsed)
+        
         if was_cancelled:
             progress_value = completed / total if total > 0 else 0
             self.progress_bar.set(progress_value)
-            
-            elapsed = self.progress_tracker.get_elapsed_seconds()
-            elapsed_formatted = self.progress_tracker.format_time(elapsed)
             
             self.progress_label.configure(
                 text=f"⚠️ Export cancelled after {elapsed_formatted}. Saved {completed}/{total} reports",
@@ -2524,8 +2501,6 @@ class SalesforceExporterApp(ctk.CTkToplevel):
             self._log(f"📊 Total: {total} reports")
         
         # Export statistics
-        elapsed = self.progress_tracker.get_elapsed_seconds()
-        elapsed_formatted = self.progress_tracker.format_time(elapsed)
         avg_speed = completed / elapsed if elapsed > 0 else 0
         
         self._log(f"⏱️  Duration: {elapsed_formatted}")
@@ -2550,63 +2525,86 @@ class SalesforceExporterApp(ctk.CTkToplevel):
             if len(failed) > 5:
                 self._log(f"  ... and {len(failed) - 5} more (see summary file)")
         
-        # Show completion message with statistics
-        elapsed = self.progress_tracker.get_elapsed_seconds()
-        elapsed_formatted = self.progress_tracker.format_time(elapsed)
-        avg_speed = completed / elapsed if elapsed > 0 else 0
-        
+        # ✅ FIX: Handle cancellation vs completion separately
         if was_cancelled:
-            # Ask user about partial export
-            message = f"Export was cancelled.\n\n"
-            message += f"📊 Statistics:\n"
-            message += f"  • Completed: {completed}/{total} reports\n"
-            message += f"  • Successful: {len(successful)}\n"
-            message += f"  • Failed: {len(failed)}\n"
-            message += f"  • Duration: {elapsed_formatted}\n"
-            if avg_speed > 0:
-                message += f"  • Average Speed: {avg_speed:.1f} reports/sec\n"
-            message += f"\nPartial export saved to:\n{zip_path}\n\n"
-            message += f"Do you want to keep this partial export?"
-            
-            keep_result = messagebox.askyesnocancel(
-                "Export Cancelled",
-                message,
-                icon='warning'
-            )
-            
-            if keep_result is False:  # User chose "No" - delete
-                try:
-                    os.remove(zip_path)
-                    self._log(f"🗑️ Partial export deleted")
-                    messagebox.showinfo("Deleted", "Partial export has been deleted.")
-                    return
-                except Exception as e:
-                    self._log(f"❌ Failed to delete: {str(e)}")
-            elif keep_result is None:  # User chose "Cancel" - do nothing
-                return
-            # If True, continue to open folder option
+            self._handle_cancelled_export(completed, total, successful, failed, elapsed_formatted, avg_speed, zip_path)
         else:
-            success_rate = (len(successful) / total * 100) if total > 0 else 0
-            
-            message = f"Export completed successfully!\n\n"
-            message += f"📊 Statistics:\n"
-            message += f"  • Total Reports: {total}\n"
-            message += f"  • Successful: {len(successful)}\n"
-            message += f"  • Failed: {len(failed)}\n"
-            message += f"  • Success Rate: {success_rate:.1f}%\n"
-            message += f"  • Duration: {elapsed_formatted}\n"
-            if avg_speed > 0:
-                message += f"  • Average Speed: {avg_speed:.1f} reports/sec\n"
-            message += f"\n💾 ZIP saved to:\n{zip_path}"
-            
-            messagebox.showinfo("Export Complete", message)
+            self._handle_successful_export(total, successful, failed, elapsed_formatted, avg_speed, zip_path)
+    
+    def _handle_cancelled_export(self, completed, total, successful, failed, elapsed_formatted, avg_speed, zip_path):
+        """Handle UI flow when export was cancelled"""
         
-        # Ask if user wants to open folder
-        result = messagebox.askyesno("Open Folder?", "Would you like to open the folder containing the exported file?")
+        # Build cancellation message
+        message = f"Export was cancelled.\n\n"
+        message += f"📊 Statistics:\n"
+        message += f"  • Completed: {completed}/{total} reports\n"
+        message += f"  • Successful: {len(successful)}\n"
+        message += f"  • Failed: {len(failed)}\n"
+        message += f"  • Duration: {elapsed_formatted}\n"
+        if avg_speed > 0:
+            message += f"  • Average Speed: {avg_speed:.1f} reports/sec\n"
+        message += f"\nPartial export saved to:\n{zip_path}\n\n"
+        message += f"Do you want to keep this partial export?"
+        
+        # Ask user about partial export
+        keep_result = messagebox.askyesnocancel(
+            "Export Cancelled",
+            message,
+            icon='warning'
+        )
+        
+        if keep_result is False:  # User chose "No" - delete
+            try:
+                import os
+                os.remove(zip_path)
+                self._log(f"🗑️ Partial export deleted")
+                messagebox.showinfo("Deleted", "Partial export has been deleted.")
+            except Exception as e:
+                self._log(f"❌ Failed to delete: {str(e)}")
+                messagebox.showerror("Error", f"Could not delete file:\n{str(e)}")
+        
+        elif keep_result is True:  # User chose "Yes" - keep and ask about opening folder
+            self._ask_open_folder(zip_path)
+        
+        # If None (Cancel button), do nothing - just keep the file
+    
+    def _handle_successful_export(self, total, successful, failed, elapsed_formatted, avg_speed, zip_path):
+        """Handle UI flow when export completed successfully"""
+        
+        success_rate = (len(successful) / total * 100) if total > 0 else 0
+        
+        # Build success message
+        message = f"Export completed successfully!\n\n"
+        message += f"📊 Statistics:\n"
+        message += f"  • Total Reports: {total}\n"
+        message += f"  • Successful: {len(successful)}\n"
+        message += f"  • Failed: {len(failed)}\n"
+        message += f"  • Success Rate: {success_rate:.1f}%\n"
+        message += f"  • Duration: {elapsed_formatted}\n"
+        if avg_speed > 0:
+            message += f"  • Average Speed: {avg_speed:.1f} reports/sec\n"
+        message += f"\n💾 ZIP saved to:\n{zip_path}"
+        
+        # Show success dialog
+        messagebox.showinfo("Export Complete", message)
+        
+        # Ask about opening folder
+        self._ask_open_folder(zip_path)
+    
+    def _ask_open_folder(self, zip_path):
+        """Ask user if they want to open the folder containing the export"""
+        import subprocess
+        import platform
+        import os
+        
+        result = messagebox.askyesno(
+            "Open Folder?", 
+            "Would you like to open the folder containing the exported file?"
+        )
+        
         if result:
             folder = os.path.dirname(zip_path)
             
-            # ✅ FIX: Safer platform-specific folder opening
             try:
                 if platform.system() == "Windows":
                     os.startfile(folder)
@@ -2614,6 +2612,9 @@ class SalesforceExporterApp(ctk.CTkToplevel):
                     subprocess.Popen(["open", folder])
                 else:  # Linux
                     subprocess.Popen(["xdg-open", folder])
+                
+                self._log(f"📂 Opened folder: {folder}")
+                
             except Exception as e:
                 self._log(f"❌ Could not open folder: {str(e)}")
                 messagebox.showerror("Error", f"Could not open folder:\n{str(e)}")
