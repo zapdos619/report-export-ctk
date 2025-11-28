@@ -2263,21 +2263,37 @@ class SalesforceExporterApp(ctk.CTkToplevel):
             session_id = self.session_info.get("session_id")
             instance_url = self.session_info.get("instance_url")
             
-            def progress_callback(done, total):
-                # Batch progress updates (every 5 reports or 1 second)
-                if not hasattr(progress_callback, 'last_update'):
-                    progress_callback.last_update = 0
-                    progress_callback.last_time = time.time()
+            def progress_callback(done, total, report_name=None):
+                """
+                ✅ FIX: Real-time progress updates with report names
+                Args:
+                    done: Number of reports completed
+                    total: Total reports to export
+                    report_name: Optional name of report being downloaded
+                """
+                # If report_name provided, it means download is STARTING
+                if report_name:
+                    # Send special progress update with report name
+                    self.update_queue.put(("progress_with_name", (done, total, report_name)))
+                    return
                 
-                current_time = time.time()
+                # Otherwise, normal progress update (report COMPLETED)
+                self.update_queue.put(("progress", (done, total)))
                 
-                if (done - progress_callback.last_update >= 5 or 
-                    current_time - progress_callback.last_time >= 1.0 or
-                    done == total):
+                # ✅ Log every report download immediately
+                if done > 0 and done <= total:
+                    percentage = int((done / total) * 100)
                     
-                    self.update_queue.put(("progress", (done, total)))
-                    progress_callback.last_update = done
-                    progress_callback.last_time = current_time
+                    # Show speed after first few reports
+                    if done > 2:
+                        speed = self.progress_tracker.get_speed()
+                        if speed > 0.1:  # Only show speed if meaningful
+                            self.update_queue.put(("log", f"  ✓ Report {done}/{total} ({percentage}%) • {speed:.1f}/sec"))
+                        else:
+                            self.update_queue.put(("log", f"  ✓ Report {done}/{total} ({percentage}%)"))
+                    else:
+                        # First few reports - don't show speed yet
+                        self.update_queue.put(("log", f"  ✓ Report {done}/{total} ({percentage}%)"))
             
             exporter = SalesforceReportExporter(
                 session_id,
@@ -2306,10 +2322,28 @@ class SalesforceExporterApp(ctk.CTkToplevel):
         """Handle export progress update with ETA and speed"""
         done, total = progress_data
         
-        # Update progress tracker
+        # ✅ FIX: Throttle UI updates to prevent freezing
+        current_time = time.time()
+        
+        # Initialize throttle timer on first call
+        if not hasattr(self, '_last_progress_ui_update'):
+            self._last_progress_ui_update = 0
+        
+        # Calculate time since last UI update
+        time_since_last_update = current_time - self._last_progress_ui_update
+        
+        # ✅ SMART THROTTLING: Always update first and last, throttle middle
+        should_update_ui = (
+            done == 1 or                          # Always update first report
+            done == total or                       # Always update last report
+            time_since_last_update >= 0.5          # Throttle to max 2 updates/sec
+        )
+        
+        # Always update the tracker (for speed calculations)
         self.progress_tracker.update(done)
         
-        if total > 0:
+        # Only update UI widgets if throttle allows
+        if should_update_ui and total > 0:
             progress = done / total
             self.progress_bar.set(progress)
             
@@ -2320,19 +2354,30 @@ class SalesforceExporterApp(ctk.CTkToplevel):
                 text_color="#1f6aa5"
             )
             
-            # Log milestone updates (every 10% or every 50 reports)
-            if done % 50 == 0 or done == total:
-                percentage = int((done / total) * 100)
-                speed = self.progress_tracker.get_speed()
-                
-                if speed > 0:
-                    self.update_queue.put(("log", 
-                        f"📦 Progress: {done}/{total} ({percentage}%) • {speed:.1f} reports/sec"
-                    ))
-                else:
-                    self.update_queue.put(("log", 
-                        f"📦 Progress: {done}/{total} ({percentage}%)"
-                    ))
+            # Update throttle timer
+            self._last_progress_ui_update = current_time
+    
+    
+    def _on_export_progress_with_name(self, progress_data):
+        """
+        Handle progress update with report name (download starting).
+        Shows which report is currently being downloaded.
+        """
+        done, total, report_name = progress_data
+        
+        # ✅ Show current report in progress label
+        if total > 0:
+            progress = done / total
+            percentage = int(progress * 100)
+            
+            # Truncate long report names
+            display_name = report_name[:40] + "..." if len(report_name) > 40 else report_name
+            
+            # Update progress label with current report
+            self.progress_label.configure(
+                text=f"📥 Downloading: {display_name} ({done}/{total} - {percentage}%)",
+                text_color="#1f6aa5"
+            )
     
     def _on_export_complete(self, result: Dict):
         """Handle export completion (including cancellation)"""
@@ -2607,6 +2652,9 @@ class SalesforceExporterApp(ctk.CTkToplevel):
                         self._on_loading_progress(data)
                     elif event_type == "data_error":
                         self._on_data_error(data)
+                    elif event_type == "progress_with_name":
+                        # ✅ NEW: Handle progress update with report name
+                        self._on_export_progress_with_name(data)
                     elif event_type == "progress":
                         self._on_export_progress(data)
                     elif event_type == "export_complete":

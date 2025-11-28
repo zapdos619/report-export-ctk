@@ -1,6 +1,7 @@
 # salesforce_auth.py
 # Universal Salesforce authentication using SOAP login
 # NO CONNECTED APP REQUIRED - Works on any Salesforce org!
+# ✅ FIXED: Custom domain handling
 
 import requests
 import re
@@ -83,12 +84,17 @@ class SalesforceAuth:
         Raises:
             SalesforceAuthError: If authentication fails
         """
-        # Build the login URL
+        # ✅ FIXED: Build the login URL with proper custom domain handling
         if domain in ('login', 'test'):
+            # Standard production or sandbox login
             base_url = f"https://{domain}.salesforce.com"
-        elif domain.endswith('.salesforce.com'):
+        elif '.salesforce.com' in domain:
+            # ✅ FIX: Custom domain already contains .salesforce.com
+            # Examples: mycompany.my.salesforce.com, mycompany--sandbox.sandbox.my.salesforce.com
             base_url = f"https://{domain}"
         else:
+            # Plain custom domain - append .salesforce.com
+            # Example: "mycompany" becomes "https://mycompany.salesforce.com"
             base_url = f"https://{domain}.salesforce.com"
         
         # Use a stable SOAP version for login

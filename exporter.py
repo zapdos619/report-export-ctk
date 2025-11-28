@@ -935,6 +935,17 @@ class SalesforceReportExporter:
                 report_name = report.get("name") or report_id
                 report_type = report.get("reportFormat", "TABULAR")
                 
+                # ✅ NEW: Notify UI that we're starting this report
+                if self.progress_callback:
+                    try:
+                        # Send special progress update with report name
+                        # Format: (current_count, total_count, report_name)
+                        with completed_lock:
+                            current_count = completed
+                        self.progress_callback(current_count, len(reports), report_name)
+                    except:
+                        pass  # Ignore errors in callback
+                
                 # Generate filename
                 base_name = safe_filename(report_name)
                 
@@ -956,6 +967,13 @@ class SalesforceReportExporter:
                         return ("cancelled", report, None)
                     
                     try:
+                        # ✅ NEW: Update progress label with current report name
+                        if self.progress_callback:
+                            try:
+                                self.progress_callback(completed, total)
+                            except:
+                                pass
+
                         csv_content = self.export_report_csv(report_id, timeout=120)
                         
                         if not csv_content or len(csv_content.strip()) == 0:
@@ -970,6 +988,14 @@ class SalesforceReportExporter:
                         # Success!
                         with completed_lock:
                             completed += 1
+                        
+                        # ✅ NEW: Notify UI that this report completed
+                        if self.progress_callback:
+                            try:
+                                # Send progress update without report name (completed)
+                                self.progress_callback(current_count, len(reports))
+                            except:
+                                pass
                         
                         return ("success", report, filename)
                         
