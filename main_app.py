@@ -1984,20 +1984,21 @@ class SalesforceExporterApp(ctk.CTkToplevel):
         """
         Remove a single item from selected panel.
         
-        ✅ FIXED: Works with virtual tree view (no direct checkbox access).
+        ✅ FIXED: Now properly updates both report AND folder checkboxes in virtual tree.
         """
         if item_id not in self.selected_items:
             return
         
         item_data = self.selected_items[item_id]
         item_name = item_data.get("name", "Unknown")
+        folder_id = item_data.get("folder_id")
         
         # Remove from selected items
         del self.selected_items[item_id]
         
         self._log(f"❌ Removed: {item_name}")
         
-        # ✅ Update virtual tree selection state (this will uncheck the checkbox)
+        # ✅ This now triggers the re-render via update_selection_state()
         if self.virtual_tree:
             selected_report_ids = set(self.selected_items.keys())
             self.virtual_tree.update_selection_state(selected_report_ids)

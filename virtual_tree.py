@@ -359,9 +359,89 @@ class VirtualTreeView:
         
         Args:
             selected_report_ids: Set of currently selected report IDs
+            
+        ✅ FIXED: Forces re-render of visible items to update checkboxes immediately.
+        This is the simplest and most reliable approach.
         """
         with self.render_lock:
             self.selected_report_ids = selected_report_ids
         
-        # Force re-render of visible items to update checkboxes
-        self.parent_frame.after(10, self._render_visible_items)
+        # ✅ SIMPLE FIX: Just re-render all visible items
+        # This destroys and recreates them with correct checkbox states
+        # Virtual scrolling makes this very fast (only ~10-20 items re-rendered)
+        
+        # Get list of currently visible indices
+        visible_indices = list(self.visible_widgets.keys())
+        
+        # Remove and recreate each visible item
+        for idx in visible_indices:
+            self._remove_item_widget(idx)
+            self._create_item_widget(idx)
+        
+        # Note: We don't call _render_visible_items() because that calculates
+        # the viewport and might render different items. We want to update
+        # the EXACT items that are currently visible.
+    
+    
+    def _update_item_checkboxes(self, idx: int):
+        """
+        Update checkboxes for a specific visible item without destroying/recreating widgets.
+        
+        This is much faster than re-rendering the entire item.
+        
+        Args:
+            idx: Index of the item in all_items
+            
+        ✅ NEW: Efficiently updates only checkbox states, not entire widgets.
+        """
+        if idx not in self.visible_widgets:
+            return
+        
+        if idx >= len(self.all_items):
+            return
+        
+        widget_data = self.visible_widgets[idx]
+        item = self.all_items[idx]
+        
+        folder_id = item.get("folder", {}).get("id")
+        reports = item.get("reports", [])
+        
+        if not folder_id or not reports:
+            return
+        
+        # ✅ Check if ALL reports in this folder are selected
+        report_ids_in_folder = {r.get("id") for r in reports}
+        all_selected = report_ids_in_folder.issubset(self.selected_report_ids)
+        
+        # ✅ Update folder checkbox state
+        if "checkbox_var" in widget_data:
+            try:
+                widget_data["checkbox_var"].set(all_selected)
+            except:
+                pass
+        
+        # ✅ Update individual report checkboxes if folder is expanded
+        if folder_id in self.expanded_folders and "reports_frame" in widget_data:
+            reports_frame = widget_data["reports_frame"]
+            
+            if reports_frame and reports_frame.winfo_exists():
+                # Find report checkboxes in reports_frame and update them
+                for widget in reports_frame.winfo_children():
+                    if isinstance(widget, ctk.CTkFrame):
+                        # This is a report row frame
+                        for child in widget.winfo_children():
+                            if isinstance(child, ctk.CTkCheckBox):
+                                # Found the report checkbox
+                                # Extract report ID from the checkbox's command
+                                # (We stored it when creating the checkbox)
+                                
+                                # Get all reports and match by position
+                                for report in reports:
+                                    report_id = report.get("id")
+                                    is_selected = report_id in self.selected_report_ids
+                                    
+                                    try:
+                                        # Update checkbox state
+                                        child.deselect() if not is_selected else child.select()
+                                    except:
+                                        pass
