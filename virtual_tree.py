@@ -21,17 +21,21 @@ class VirtualTreeView:
     ):
         self.parent_frame = parent_frame
         self.item_height = item_height
-        self.buffer_items = buffer_items  # ✅ Store correctly
+        self.buffer_items = buffer_items
         
         # Data storage
-        self.all_items: List[Dict] = []  # All folder data
-        self.visible_widgets: Dict[int, Dict] = {}  # Currently rendered widgets
-        self.expanded_folders: Set[str] = set()  # Expanded folder IDs
+        self.all_items: List[Dict] = []
+        self.visible_widgets: Dict[int, Dict] = {}
+        self.expanded_folders: Set[str] = set()
+        
+        # ✅ NEW: Selection state tracking
+        self.selected_report_ids: Set[str] = set()  # Track selected report IDs
         
         # Callbacks
         self.on_folder_checkbox: Optional[Callable] = None
         self.on_folder_expand: Optional[Callable] = None
         self.on_report_checkbox: Optional[Callable] = None
+        self.get_selection_state: Optional[Callable] = None  # ✅ NEW: Get selection from main app
         
         # Scroll tracking
         self.last_scroll_y = 0
@@ -56,11 +60,21 @@ class VirtualTreeView:
         except Exception as e:
             print(f"⚠️ Could not setup scroll monitoring: {e}")
     
-    def set_items(self, items: List[Dict]):
-        """Set all items and trigger initial render"""
+    def set_items(self, items: List[Dict], selected_report_ids: Set[str] = None):
+        """
+        Set all items and trigger initial render.
+        
+        Args:
+            items: List of folder data with reports
+            selected_report_ids: Set of currently selected report IDs
+        """
         with self.render_lock:
             self.all_items = items
             self.visible_widgets.clear()
+            
+            # ✅ Update selection state
+            if selected_report_ids is not None:
+                self.selected_report_ids = selected_report_ids
         
         # Schedule render on main thread
         self.parent_frame.after(10, self._render_visible_items)
@@ -179,8 +193,15 @@ class VirtualTreeView:
         folder_frame.grid(row=row, column=0, sticky="ew", padx=5, pady=2)
         folder_frame.grid_columnconfigure(2, weight=1)
         
+        # ✅ FIXED: Check if ALL reports in folder are selected
+        reports = item.get("reports", [])
+        all_reports_selected = False
+        if reports:
+            report_ids_in_folder = {r.get("id") for r in reports}
+            all_reports_selected = report_ids_in_folder.issubset(self.selected_report_ids)
+
         # Folder checkbox
-        checkbox_var = ctk.BooleanVar(value=False)
+        checkbox_var = ctk.BooleanVar(value=all_reports_selected)
         checkbox = ctk.CTkCheckBox(
             folder_frame,
             text="",
@@ -258,8 +279,11 @@ class VirtualTreeView:
             report_frame.grid(row=idx, column=0, sticky="ew", padx=10, pady=2)
             report_frame.grid_columnconfigure(1, weight=1)
             
+            # ✅ FIXED: Check if this report is selected
+            is_selected = report_id in self.selected_report_ids
+
             # Report checkbox
-            report_checkbox_var = ctk.BooleanVar(value=False)
+            report_checkbox_var = ctk.BooleanVar(value=is_selected)
             report_checkbox = ctk.CTkCheckBox(
                 report_frame,
                 text="",
@@ -326,3 +350,18 @@ class VirtualTreeView:
         """Handle report checkbox click"""
         if self.on_report_checkbox:
             self.on_report_checkbox(report_id, report_name, folder_id, checkbox_var)
+    
+    def update_selection_state(self, selected_report_ids: Set[str]):
+        """
+        Update the selection state and refresh visible items.
+        
+        Should be called from main app when selection changes.
+        
+        Args:
+            selected_report_ids: Set of currently selected report IDs
+        """
+        with self.render_lock:
+            self.selected_report_ids = selected_report_ids
+        
+        # Force re-render of visible items to update checkboxes
+        self.parent_frame.after(10, self._render_visible_items)

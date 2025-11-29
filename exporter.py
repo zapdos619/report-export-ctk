@@ -287,7 +287,7 @@ class SalesforceReportExporter:
         
         return all_records
 
-    def list_report_folders(self) -> List[Dict[str, Any]]:
+    def list_all_report_folders(self) -> List[Dict[str, Any]]:
         """
         Fetch list of all report folders in the org that the user has access to.
         Returns list of folder metadata (id, name, type, etc.)
@@ -332,7 +332,7 @@ class SalesforceReportExporter:
         except Exception as e:
             raise Exception(f"Failed to fetch report folders: {str(e)}")
 
-    def list_reports(self, folder_id: str = None) -> List[Dict[str, Any]]:
+    def list_all_reports(self, folder_id: str = None) -> List[Dict[str, Any]]:
         """
         Fetch list of all available reports using REST API or SOQL query.
         
@@ -360,6 +360,7 @@ class SalesforceReportExporter:
             reports = []
         
         return reports
+
 
     def _list_reports_by_soql(self, folder_id: str) -> List[Dict[str, Any]]:
         """
@@ -402,6 +403,210 @@ class SalesforceReportExporter:
         except Exception as e:
             print(f"Error querying reports by folder: {str(e)}")
             return []
+
+    def search_by_keyword(self, keyword: str, cancel_event=None) -> Dict[str, Any]:
+        """
+        Search folders AND reports by keyword, then organize results.
+        
+        This method:
+        1. Searches folders whose NAME matches keyword
+        2. Searches reports whose NAME matches keyword
+        3. Fetches parent folders that contain matching reports (even if folder name doesn't match)
+        4. Groups reports by their folders
+        5. For folders matched by name, includes ALL their reports
+        
+        Args:
+            keyword: Search keyword (e.g., "Sales", "Q4", "Account")
+            cancel_event: Optional threading.Event to check for cancellation
+            
+        Returns:
+            {
+                "folders": [list of folder metadata],
+                "reports_by_folder": {folder_id: [list of reports in that folder]}
+            }
+            
+        Example:
+            result = exporter.search_by_keyword("Sales")
+            folders = result["folders"]  # All relevant folders
+            reports = result["reports_by_folder"]  # Reports grouped by folder
+        """
+        try:
+            # Check cancellation
+            if cancel_event and cancel_event.is_set():
+                return {"folders": [], "reports_by_folder": {}}
+            
+            # Escape keyword for SOQL (prevent injection)
+            keyword_escaped = keyword.replace("'", "\\'").replace("%", "\\%")
+            
+            # ===== STEP 1: Search folders by name =====
+            folders_query = f"""
+                SELECT Id, Name, Type, DeveloperName, AccessType 
+                FROM Folder 
+                WHERE Type = 'Report' 
+                AND Name LIKE '%{keyword_escaped}%'
+                ORDER BY Name
+            """
+            
+            matching_folders = self._execute_soql_query(folders_query)
+            folder_ids_from_name_match = {f.get("Id") for f in matching_folders}
+            
+            # Check cancellation
+            if cancel_event and cancel_event.is_set():
+                return {"folders": [], "reports_by_folder": {}}
+            
+            # ===== STEP 2: Search reports by name =====
+            reports_query = f"""
+                SELECT Id, Name, DeveloperName, FolderName, Format, 
+                       CreatedDate, LastModifiedDate, OwnerId
+                FROM Report 
+                WHERE Name LIKE '%{keyword_escaped}%'
+                ORDER BY Name
+            """
+            
+            matching_reports = self._query_with_pagination(reports_query.strip())
+            
+            # Check cancellation
+            if cancel_event and cancel_event.is_set():
+                return {"folders": [], "reports_by_folder": {}}
+            
+            # ===== STEP 3: Get folder IDs from matching reports =====
+            folder_ids_from_reports = {r.get("OwnerId") for r in matching_reports if r.get("OwnerId")}
+            
+            # ===== STEP 4: Fetch folders that contain matching reports (but weren't in name search) =====
+            additional_folder_ids = folder_ids_from_reports - folder_ids_from_name_match
+            
+            additional_folders = []
+            if additional_folder_ids:
+                # Fetch these folders in chunks (SOQL IN clause limit)
+                folder_ids_list = list(additional_folder_ids)
+                chunk_size = 100
+                
+                for i in range(0, len(folder_ids_list), chunk_size):
+                    # Check cancellation
+                    if cancel_event and cancel_event.is_set():
+                        return {"folders": [], "reports_by_folder": {}}
+                    
+                    chunk = folder_ids_list[i:i + chunk_size]
+                    ids_str = ",".join([f"'{fid}'" for fid in chunk])
+                    
+                    folders_query = f"""
+                        SELECT Id, Name, Type, DeveloperName, AccessType 
+                        FROM Folder 
+                        WHERE Id IN ({ids_str})
+                    """
+                    
+                    chunk_folders = self._execute_soql_query(folders_query)
+                    additional_folders.extend(chunk_folders)
+            
+            # ===== STEP 5: Combine all folders =====
+            all_folders = matching_folders + additional_folders
+            
+            # ===== STEP 6: Group reports by folder =====
+            reports_by_folder = {}
+            
+            for report in matching_reports:
+                folder_id = report.get("OwnerId")
+                if folder_id:
+                    if folder_id not in reports_by_folder:
+                        reports_by_folder[folder_id] = []
+                    
+                    reports_by_folder[folder_id].append({
+                        "id": report.get("Id"),
+                        "name": report.get("Name"),
+                        "developerName": report.get("DeveloperName"),
+                        "folderName": report.get("FolderName"),
+                        "reportFormat": report.get("Format", "TABULAR"),
+                        "lastModifiedDate": report.get("LastModifiedDate"),
+                        "createdDate": report.get("CreatedDate")
+                    })
+            
+            # Check cancellation
+            if cancel_event and cancel_event.is_set():
+                return {"folders": [], "reports_by_folder": {}}
+            
+            # ===== STEP 7: For folders matched by name, get ALL their reports =====
+            for folder in matching_folders:
+                folder_id = folder.get("Id")
+                
+                # Check cancellation
+                if cancel_event and cancel_event.is_set():
+                    return {"folders": [], "reports_by_folder": {}}
+                
+                # If this folder doesn't have any reports yet (from keyword search),
+                # fetch ALL reports in this folder
+                if folder_id not in reports_by_folder:
+                    reports_query = f"""
+                        SELECT Id, Name, DeveloperName, FolderName, Format, 
+                               CreatedDate, LastModifiedDate
+                        FROM Report 
+                        WHERE OwnerId = '{folder_id}'
+                        ORDER BY Name
+                    """
+                    
+                    folder_reports = self._query_with_pagination(reports_query.strip())
+                    
+                    reports_by_folder[folder_id] = [
+                        {
+                            "id": r.get("Id"),
+                            "name": r.get("Name"),
+                            "developerName": r.get("DeveloperName"),
+                            "folderName": r.get("FolderName"),
+                            "reportFormat": r.get("Format", "TABULAR"),
+                            "lastModifiedDate": r.get("LastModifiedDate"),
+                            "createdDate": r.get("CreatedDate")
+                        }
+                        for r in folder_reports
+                    ]
+            
+            # ===== STEP 8: Clean up folder metadata =====
+            cleaned_folders = []
+            for folder in all_folders:
+                cleaned_folders.append({
+                    "id": folder.get("Id"),
+                    "name": folder.get("Name"),
+                    "type": folder.get("Type"),
+                    "developerName": folder.get("DeveloperName"),
+                    "accessType": folder.get("AccessType")
+                })
+            
+            return {
+                "folders": cleaned_folders,
+                "reports_by_folder": reports_by_folder
+            }
+            
+        except Exception as e:
+            raise Exception(f"Search failed: {str(e)}")
+    
+    def _execute_soql_query(self, query: str) -> List[Dict]:
+        """
+        Helper method to execute a SOQL query and return records.
+        
+        Args:
+            query: SOQL query string
+            
+        Returns:
+            List of record dictionaries
+            
+        Raises:
+            Exception: If query fails
+        """
+        try:
+            query_url = f"{self.instance_url}/services/data/{self.api_version}/query"
+            params = {"q": query.strip()}
+            
+            response = requests.get(
+                query_url,
+                headers=self.api_headers,
+                params=params,
+                timeout=30
+            )
+            response.raise_for_status()
+            
+            data = response.json()
+            return data.get("records", [])
+            
+        except requests.RequestException as e:
+            raise Exception(f"SOQL query failed: {str(e)}")
 
     def export_report_csv(self, report_id: str, timeout: int = 120) -> str:
         """
@@ -1117,6 +1322,7 @@ class SalesforceReportExporter:
                 shutil.rmtree(tmp_dir)
             except Exception:
                 pass
+
 
     def _get_folder_name(self, folder_id: str) -> str:
         """Get the name of a folder by its ID"""

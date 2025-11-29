@@ -945,7 +945,7 @@ class SalesforceExporterApp(ctk.CTkToplevel):
         if self._is_ui_busy():
             # ✅ Better message based on what's happening
             if self.is_loading:
-                message = "Data is still loading. Cancel loading and logout?"
+                message = "Search is in progress. Cancel search and logout?"
             elif self.is_exporting:
                 message = "Export is in progress. Cancel export and logout?"
             else:
@@ -1035,29 +1035,353 @@ class SalesforceExporterApp(ctk.CTkToplevel):
     
     def _auto_load_data_on_startup(self):
         """
-        ✅ NEW: Don't auto-load anything on startup.
+        Show welcome message and instructions - NO auto-loading.
         User must search to load data.
         """
         if not self.session_info:
             self._log("⚠️ No session info available")
             return
         
-        # Log session info
-        instance = self.session_info.get("instance_url", "")
+        # Extract session info
+        instance = self.session_info.get("instance_url", "").replace("https://", "")
         api_version = self.session_info.get("api_version", "")
         user_name = self.session_info.get("user_name", "")
         
-        self._log(f"✅ Connected to {instance}")
+        # Log welcome message
+        self._log("=" * 50)
+        self._log("✅ CONNECTED TO SALESFORCE")
+        self._log(f"🌐 Instance: {instance}")
         self._log(f"🔌 API Version: v{api_version}")
         if user_name:
             self._log(f"👤 User: {user_name}")
+        self._log("=" * 50)
+        self._log("")
+        self._log("🔍 Ready to search!")
+        self._log("💡 Enter keywords like 'Sales', 'Account', 'Q4 2024', etc.")
+        self._log("💡 Press Enter or click Search button to find reports")
+        self._log("")
         
-        # ✅ NEW: Show helpful message instead of loading
-        self._log("🔍 Use the search box to find folders and reports")
-        self._log("💡 Tip: Try keywords like 'Sales', 'Account', 'Q4', etc.")
-        
-        # Show empty state in tree
+        # Show empty search state in tree
         self._show_empty_search_state()
+        
+    def _search_worker(self, keyword: str):
+        """
+        Background worker to search Salesforce by keyword.
+        
+        Uses the new search_by_keyword() method from exporter which:
+        1. Searches folders matching keyword
+        2. Searches reports matching keyword
+        3. Fetches parent folders of matching reports
+        4. Groups reports by folder
+        5. Returns organized data ready for tree view
+        
+        Args:
+            keyword: Search term entered by user
+        """
+        try:
+            session_id = self.session_info.get("session_id")
+            instance_url = self.session_info.get("instance_url")
+            
+            # Create exporter instance
+            exporter = SalesforceReportExporter(session_id, instance_url)
+            
+            # Log search start
+            self.update_queue.put(("log", f"🔍 Searching for: '{keyword}'"))
+            
+            # Check cancellation before search
+            if self.export_cancel_event.is_set():
+                self.update_queue.put(("search_cancelled", None))
+                return
+            
+            # ✅ MAIN SEARCH: This does all the heavy lifting
+            result = exporter.search_by_keyword(
+                keyword=keyword,
+                cancel_event=self.export_cancel_event
+            )
+            
+            # Check cancellation after search
+            if self.export_cancel_event.is_set():
+                self.update_queue.put(("search_cancelled", None))
+                return
+            
+            # Extract results
+            folders = result.get("folders", [])
+            reports_by_folder = result.get("reports_by_folder", {})
+            
+            # Calculate statistics
+            total_folders = len(folders)
+            total_reports = sum(len(reports) for reports in reports_by_folder.values())
+            
+            # Log results
+            self.update_queue.put(("log", f"✅ Found {total_folders} folders with {total_reports} reports"))
+            
+            # Send organized data to UI
+            self.update_queue.put(("search_complete", {
+                "folders": folders,
+                "reports_by_folder": reports_by_folder,
+                "keyword": keyword
+            }))
+            
+        except Exception as e:
+            import traceback
+            error_details = traceback.format_exc()
+            self.update_queue.put(("log", f"❌ Search error: {error_details}"))
+            self.update_queue.put(("search_error", str(e)))
+
+
+    def _on_search_complete(self, result: Dict):
+        """
+        Handle search completion and populate tree with results.
+        
+        Args:
+            result: Dictionary containing:
+                - folders: List of folder metadata
+                - reports_by_folder: Dict mapping folder_id to list of reports
+                - keyword: The search keyword used
+        """
+        # Extract data
+        folders = result.get("folders", [])
+        reports_by_folder = result.get("reports_by_folder", {})
+        keyword = result.get("keyword", "")
+        
+        # Update data storage
+        with self.data_lock:
+            self.available_folders = folders
+            self.reports_by_folder = reports_by_folder
+        
+        # Calculate statistics
+        total_folders = len(folders)
+        total_reports = sum(len(reports) for reports in reports_by_folder.values())
+        
+        # Clear search loading state
+        for widget in self.tree_container.winfo_children():
+            widget.destroy()
+        
+        # Check if we got results
+        if total_folders == 0 and total_reports == 0:
+            # No results found
+            self._show_no_results_state(keyword)
+            
+            # Re-enable search
+            self.search_button.configure(state="normal", text="🔍 Search")
+            self.left_search_entry.configure(state="normal")
+            
+            # Reset state
+            self._set_ui_state("idle")
+            
+            self._log(f"ℹ️ No results found for '{keyword}'")
+            return
+        
+        # Populate tree with results
+        self._log(f"📊 Displaying {total_folders} folders with {total_reports} reports")
+        
+        # Use existing populate_tree method (no search_term needed - data is already filtered)
+        self._populate_tree("")
+        
+        # Re-enable search
+        self.search_button.configure(state="normal", text="🔍 Search")
+        self.left_search_entry.configure(state="normal")
+        
+        # Reset state
+        self._set_ui_state("idle")
+        
+        # Log summary
+        self._log("=" * 50)
+        self._log(f"✅ SEARCH COMPLETE")
+        self._log(f"🔍 Keyword: '{keyword}'")
+        self._log(f"📁 Folders: {total_folders}")
+        self._log(f"📄 Reports: {total_reports}")
+        
+        # Show folder breakdown
+        if total_folders > 0 and total_folders <= 10:
+            for folder in folders[:10]:
+                folder_id = folder.get("id")
+                folder_name = folder.get("name")
+                report_count = len(reports_by_folder.get(folder_id, []))
+                self._log(f"  • {folder_name}: {report_count} reports")
+        
+        self._log("=" * 50)
+        
+        # Update export button state
+        self._update_export_button_state()
+
+
+    def _on_search_error(self, error_msg: str):
+        """
+        Handle search error with user-friendly messages.
+        
+        Args:
+            error_msg: Error message from search worker
+        """
+        # Clear search loading state
+        for widget in self.tree_container.winfo_children():
+            widget.destroy()
+        
+        # Show error state in tree
+        error_frame = ctk.CTkFrame(self.tree_container, fg_color="transparent")
+        error_frame.grid(row=0, column=0, pady=30)
+        
+        icon_label = ctk.CTkLabel(
+            error_frame,
+            text="❌",
+            font=ctk.CTkFont(size=48)
+        )
+        icon_label.pack(pady=(0, 10))
+        
+        title_label = ctk.CTkLabel(
+            error_frame,
+            text="Search Failed",
+            font=ctk.CTkFont(size=16, weight="bold"),
+            text_color="red"
+        )
+        title_label.pack(pady=(0, 5))
+        
+        # Truncate long error messages
+        display_error = error_msg[:200] + "..." if len(error_msg) > 200 else error_msg
+        
+        error_label = ctk.CTkLabel(
+            error_frame,
+            text=display_error,
+            font=ctk.CTkFont(size=11),
+            text_color="gray",
+            wraplength=400,
+            justify="center"
+        )
+        error_label.pack(pady=(0, 15))
+        
+        # Helpful suggestion
+        suggestion = self._get_search_error_suggestion(error_msg)
+        if suggestion:
+            suggestion_label = ctk.CTkLabel(
+                error_frame,
+                text=f"💡 {suggestion}",
+                font=ctk.CTkFont(size=10),
+                text_color="#1f6aa5",
+                wraplength=400,
+                justify="center"
+            )
+            suggestion_label.pack()
+        
+        # Re-enable search
+        self.search_button.configure(state="normal", text="🔍 Search")
+        self.left_search_entry.configure(state="normal")
+        
+        # Reset state
+        self._set_ui_state("idle")
+        
+        # Log error
+        self._log(f"❌ Search failed: {error_msg}")
+        
+        # Show error dialog
+        messagebox.showerror(
+            "Search Failed",
+            f"Failed to search Salesforce:\n\n{error_msg}\n\n{suggestion}"
+        )
+
+    def _get_search_error_suggestion(self, error_msg: str) -> str:
+        """
+        Get helpful suggestion based on search error message.
+        
+        Args:
+            error_msg: Error message from search
+            
+        Returns:
+            Helpful suggestion string
+        """
+        error_lower = error_msg.lower()
+        
+        if "session" in error_lower or "authentication" in error_lower or "invalid" in error_lower:
+            return "Your session may have expired. Try logging out and back in."
+        
+        elif "network" in error_lower or "connection" in error_lower or "timeout" in error_lower:
+            return "Check your internet connection and try again."
+        
+        elif "permission" in error_lower or "access" in error_lower:
+            return "You may not have permission to search reports. Contact your Salesforce admin."
+        
+        elif "limit" in error_lower or "exceeded" in error_lower:
+            return "Salesforce API limits reached. Try a more specific search keyword or wait a few minutes."
+        
+        elif "syntax" in error_lower or "query" in error_lower:
+            return "Try a simpler search keyword (e.g., 'Sales' instead of special characters)."
+        
+        else:
+            return "Try a different search keyword or check your connection."
+
+    def _show_no_results_state(self, keyword: str):
+        """
+        Show friendly message when search returns no results.
+        
+        Args:
+            keyword: The search keyword that returned no results
+        """
+        # Clear tree
+        for widget in self.tree_container.winfo_children():
+            widget.destroy()
+        
+        # Create no results frame
+        no_results_frame = ctk.CTkFrame(self.tree_container, fg_color="transparent")
+        no_results_frame.grid(row=0, column=0, pady=50)
+        
+        # Icon
+        icon_label = ctk.CTkLabel(
+            no_results_frame,
+            text="🔍",
+            font=ctk.CTkFont(size=48)
+        )
+        icon_label.pack(pady=(0, 10))
+        
+        # Title
+        title_label = ctk.CTkLabel(
+            no_results_frame,
+            text="No Results Found",
+            font=ctk.CTkFont(size=16, weight="bold")
+        )
+        title_label.pack(pady=(0, 5))
+        
+        # Message
+        message_label = ctk.CTkLabel(
+            no_results_frame,
+            text=f"No folders or reports match '{keyword}'",
+            font=ctk.CTkFont(size=12),
+            text_color="gray"
+        )
+        message_label.pack(pady=(0, 15))
+        
+        # Suggestions
+        suggestions_label = ctk.CTkLabel(
+            no_results_frame,
+            text="💡 Try:\n• Different keywords (e.g., 'Account', 'Sales', 'Q4')\n• Shorter search terms\n• Check spelling",
+            font=ctk.CTkFont(size=11),
+            text_color="gray",
+            justify="left"
+        )
+        suggestions_label.pack()
+    
+    def _on_search_cancelled(self):
+        """Handle search cancellation (e.g., user logged out during search)"""
+        
+        # Clear search loading state
+        for widget in self.tree_container.winfo_children():
+            widget.destroy()
+        
+        # Show cancellation message
+        placeholder = ctk.CTkLabel(
+            self.tree_container,
+            text="Search cancelled",
+            text_color="gray",
+            font=ctk.CTkFont(size=12)
+        )
+        placeholder.grid(row=0, column=0, pady=30)
+        
+        # Re-enable search
+        self.search_button.configure(state="normal", text="🔍 Search")
+        self.left_search_entry.configure(state="normal")
+        
+        # Reset UI state
+        self._set_ui_state("idle")
+        
+        self._log("⚠️ Search cancelled")
     
     def _show_empty_search_state(self):
         """
@@ -1097,18 +1421,20 @@ class SalesforceExporterApp(ctk.CTkToplevel):
     def _on_search_button_clicked(self):
         """
         Handle search button click.
-        Searches Salesforce for folders/reports matching keyword.
+        Validates input and triggers backend search with threading.
         """
         # Get search keyword
         keyword = self.left_search_entry.get().strip()
         
-        # Validate
+        # Validate input
         if not keyword:
             self._log("⚠️ Please enter a search keyword")
+            messagebox.showwarning("No Keyword", "Please enter a search keyword.")
             return
         
         if len(keyword) < 2:
             self._log("⚠️ Search keyword must be at least 2 characters")
+            messagebox.showwarning("Keyword Too Short", "Please enter at least 2 characters.")
             return
         
         # Check if already searching
@@ -1116,228 +1442,78 @@ class SalesforceExporterApp(ctk.CTkToplevel):
             self._log("⚠️ Search already in progress, please wait...")
             return
         
+        # Check if session is valid
+        if not self.session_info:
+            self._log("⚠️ No active session")
+            messagebox.showerror("Not Logged In", "Please login first.")
+            return
+        
         # Start search
         self._log(f"🔍 Searching for: '{keyword}'")
-        self._start_search(keyword)  
+        self._start_search(keyword)
         
+
     def _start_search(self, keyword: str):
         """
         Start search in background thread.
-        Prevents UI freezing during search.
+        
+        Shows loading state and calls _search_worker() in separate thread
+        to prevent UI freezing during Salesforce API calls.
+        
+        Args:
+            keyword: Search term to find folders/reports
         """
         # Set loading state
         self._set_ui_state("loading")
         
-        # Clear cancel event
+        # Clear cancel event (fresh start)
         self.export_cancel_event.clear()
         
-        # Disable search button and show loading
+        # Disable search controls during search
         self.search_button.configure(state="disabled", text="🔄 Searching...")
         self.left_search_entry.configure(state="disabled")
         
-        # Show loading in tree
+        # Show loading indicator in tree
         for widget in self.tree_container.winfo_children():
             widget.destroy()
         
         loading_frame = ctk.CTkFrame(self.tree_container, fg_color="transparent")
-        loading_frame.grid(row=0, column=0, pady=30)
+        loading_frame.grid(row=0, column=0, pady=50)
         
+        # Loading spinner icon
+        loading_icon = ctk.CTkLabel(
+            loading_frame,
+            text="🔄",
+            font=ctk.CTkFont(size=48)
+        )
+        loading_icon.pack(pady=(0, 10))
+        
+        # Loading message
         loading_label = ctk.CTkLabel(
             loading_frame,
-            text="🔄 Searching Salesforce...",
+            text="Searching Salesforce...",
             text_color="gray",
-            font=ctk.CTkFont(size=12, weight="bold")
+            font=ctk.CTkFont(size=14, weight="bold")
         )
-        loading_label.pack(pady=(0, 10))
+        loading_label.pack(pady=(0, 5))
         
-        self.search_progress_label = ctk.CTkLabel(
+        # Keyword display
+        keyword_label = ctk.CTkLabel(
             loading_frame,
             text=f"Looking for: '{keyword}'",
-            text_color="gray",
-            font=ctk.CTkFont(size=11)
+            text_color="#1f6aa5",
+            font=ctk.CTkFont(size=12)
         )
-        self.search_progress_label.pack()
+        keyword_label.pack()
         
-        # Start search in background thread
+        # Start search in background thread (prevents UI freeze)
         thread = threading.Thread(
             target=self._search_worker,
             args=(keyword,),
             daemon=True
         )
         thread.start()
-  
-    def _load_all_folders(self):
-        """Load all folders and reports in background with progress"""
-        if not self.session_info:
-            return
-        
-        # Check if already loading
-        if self.is_loading:
-            self._log("⚠️ Already loading data, please wait...")
-            return
-        
-        # Set state
-        self._set_ui_state("loading")
-        
-        # ✅ CLEAR cancel event before starting
-        self.export_cancel_event.clear()
-        
-        # Disable button and show loading
-        # self.all_folders_btn.configure(state="disabled", text="⏳ Loading...")
-        
-        # Show loading indicator in tree
-        for widget in self.tree_container.winfo_children():
-            widget.destroy()
-        
-        # Create loading frame with progress
-        loading_frame = ctk.CTkFrame(self.tree_container, fg_color="transparent")
-        loading_frame.grid(row=0, column=0, pady=30)
-        
-        loading_label = ctk.CTkLabel(
-            loading_frame,
-            text="⏳ Loading folders and reports...",
-            text_color="gray",
-            font=ctk.CTkFont(size=12, weight="bold")
-        )
-        loading_label.pack(pady=(0, 10))
-        
-        self.loading_progress_label = ctk.CTkLabel(
-            loading_frame,
-            text="Connecting to Salesforce...",
-            text_color="gray",
-            font=ctk.CTkFont(size=11)
-        )
-        self.loading_progress_label.pack(pady=(0, 10))
-        
-        self.loading_progress_bar = ctk.CTkProgressBar(loading_frame, width=300)
-        self.loading_progress_bar.pack()
-        self.loading_progress_bar.set(0)
-        
-        self._log("🔄 Fetching folders and reports from Salesforce...")
-        
-        thread = threading.Thread(target=self._load_data_worker, daemon=True)
-        thread.start()
     
-    def _load_data_worker(self):
-        """Background worker to load folders and reports with progress - CANCELLABLE"""
-        try:
-            session_id = self.session_info.get("session_id")
-            instance_url = self.session_info.get("instance_url")
-            
-            exporter = SalesforceReportExporter(session_id, instance_url)
-            
-            # ✅ CHECK: Was loading cancelled?
-            if self.export_cancel_event.is_set():
-                self.update_queue.put(("loading_cancelled", None))
-                return
-            
-            # Step 1: Load folders
-            self.update_queue.put(("loading_progress", (0.1, "Fetching folders...")))
-            folders = exporter.list_report_folders()
-            self.update_queue.put(("log", f"📁 Found {len(folders)} folders"))
-            
-            # ✅ CHECK: Was loading cancelled?
-            if self.export_cancel_event.is_set():
-                self.update_queue.put(("loading_cancelled", None))
-                return
-            
-            # Step 2: Load ALL reports (for total count)
-            self.update_queue.put(("loading_progress", (0.2, "Fetching all reports...")))
-            all_reports = exporter.list_reports()
-            self.update_queue.put(("log", f"📄 Found {len(all_reports)} total reports"))
-            
-            # ✅ CHECK: Was loading cancelled?
-            if self.export_cancel_event.is_set():
-                self.update_queue.put(("loading_cancelled", None))
-                return
-            
-            # Step 3: For each folder, get reports with progress
-            self.update_queue.put(("loading_progress", (0.3, "Loading reports by folder...")))
-            
-            reports_by_folder_id = {}
-            total_folders = len(folders)
-            
-            for idx, folder in enumerate(folders):
-                # ✅ CHECK: Was loading cancelled?
-                if self.export_cancel_event.is_set():
-                    self.update_queue.put(("loading_cancelled", None))
-                    return
-                
-                folder_id = folder.get("id")
-                folder_name = folder.get("name")
-                
-                try:
-                    # Update progress
-                    progress = 0.3 + (0.6 * (idx / max(total_folders, 1)))
-                    status = f"Loading folder {idx + 1}/{total_folders}: {folder_name[:30]}..."
-                    self.update_queue.put(("loading_progress", (progress, status)))
-                    
-                    # Query reports for this folder (with pagination)
-                    folder_reports = exporter.list_reports(folder_id=folder_id)
-                    reports_by_folder_id[folder_id] = folder_reports
-                    
-                    if folder_reports:
-                        self.update_queue.put(("log", f"  ✓ {folder_name}: {len(folder_reports)} reports"))
-                    
-                except Exception as e:
-                    self.update_queue.put(("log", f"  ✗ Error loading '{folder_name}': {str(e)}"))
-                    reports_by_folder_id[folder_id] = []
-            
-            # ✅ CHECK: Was loading cancelled?
-            if self.export_cancel_event.is_set():
-                self.update_queue.put(("loading_cancelled", None))
-                return
-            
-            # Final progress
-            self.update_queue.put(("loading_progress", (0.9, "Preparing tree view...")))
-            
-            # Update UI via queue
-            self.update_queue.put(("data_loaded", {
-                "folders": folders,
-                "reports": all_reports,
-                "reports_by_folder": reports_by_folder_id
-            }))
-            
-        except Exception as e:
-            import traceback
-            error_details = traceback.format_exc()
-            self.update_queue.put(("log", f"❌ ERROR: {error_details}"))
-            self.update_queue.put(("data_error", str(e)))
-    
-    def _on_loading_cancelled(self):
-        """Handle loading cancellation (user logged out during loading)"""
-        
-        # Clear loading indicator
-        for widget in self.tree_container.winfo_children():
-            widget.destroy()
-        
-        # Show cancellation message
-        placeholder = ctk.CTkLabel(
-            self.tree_container,
-            text="Loading cancelled",
-            text_color="gray",
-            font=ctk.CTkFont(size=12)
-        )
-        placeholder.grid(row=0, column=0, pady=30)
-        
-        # Reset UI state
-        # self.all_folders_btn.configure(state="normal", text="📁 All Folders")
-        self._set_ui_state("idle")
-        
-        self._log("⚠️ Loading cancelled by user")
-    
-    def _on_loading_progress(self, progress_data):
-        """Update loading progress in tree panel"""
-        progress_value, status_text = progress_data
-        
-        try:
-            if hasattr(self, 'loading_progress_bar'):
-                self.loading_progress_bar.set(progress_value)
-            
-            if hasattr(self, 'loading_progress_label'):
-                self.loading_progress_label.configure(text=status_text)
-        except:
-            pass  # Widgets might be destroyed
     
     def _on_data_loaded(self, data: Dict):
         """Handle data loaded successfully - with virtual tree rendering"""
@@ -1378,7 +1554,23 @@ class SalesforceExporterApp(ctk.CTkToplevel):
         self.after(100, lambda: self._populate_tree_with_data(filtered_folders, total_reports_in_folders))
         
         # Re-enable button
-        # self.all_folders_btn.configure(state="normal", text="📁 All Folders")
+        # Populate tree (virtual scrolling makes this instant!)
+        self._populate_tree("")
+        
+        # Log results with statistics
+        self._log("=" * 50)
+        self._log(f"✅ DATA LOADING COMPLETE")
+        self._log(f"📁 Folders Loaded: {len(filtered_folders)}")
+        self._log(f"📄 Total Reports: {total_reports_in_folders}")
+        
+        if total_reports_in_folders > 0:
+            avg_reports_per_folder = total_reports_in_folders / len(filtered_folders) if len(filtered_folders) > 0 else 0
+            self._log(f"📊 Average Reports/Folder: {avg_reports_per_folder:.1f}")
+        
+        if total_reports_in_folders == 0:
+            self._log("⚠️ WARNING: No reports found. Check folder permissions.")
+        
+        self._log("=" * 50)
         
         # Reset state
         self._set_ui_state("idle")
@@ -1415,8 +1607,8 @@ class SalesforceExporterApp(ctk.CTkToplevel):
         
     def _on_data_error(self, error: str):
         """Handle data loading error"""
-        # self.all_folders_btn.configure(state="normal", text="📁 All Folders")
         self._log(f"❌ Error loading data: {error}")
+        self._set_ui_state("idle")
         messagebox.showerror("Error", f"Failed to load folders and reports:\n\n{error}")
     
     # ===== TREE VIEW POPULATION =====
@@ -1502,16 +1694,17 @@ class SalesforceExporterApp(ctk.CTkToplevel):
             self.virtual_tree = VirtualTreeView(
                 parent_frame=self.tree_container,
                 item_height=50,
-                buffer_items=5  # ✅ Use correct parameter name that matches __init__
+                buffer_items=5
             )
             
             # Setup callbacks
             self.virtual_tree.on_folder_checkbox = self._on_folder_checkbox_changed_virtual
             self.virtual_tree.on_report_checkbox = self._on_report_checkbox_changed_virtual
             self.virtual_tree.on_folder_expand = self._on_folder_expand_virtual
-        
-        # Set items (virtual tree will handle rendering)
-        self.virtual_tree.set_items(filtered_folders_data)
+
+        # ✅ NEW: Pass current selection state to virtual tree
+        selected_report_ids = set(self.selected_items.keys())
+        self.virtual_tree.set_items(filtered_folders_data, selected_report_ids)
         
         # Store tree_items for compatibility with existing code
         for idx, folder_data in enumerate(filtered_folders_data):
@@ -1527,7 +1720,7 @@ class SalesforceExporterApp(ctk.CTkToplevel):
     def _on_folder_checkbox_changed_virtual(self, folder_id: str, checkbox_var: ctk.BooleanVar):
         """
         Handle folder checkbox change from virtual tree.
-        ✅ NEW: Callback for virtual tree view.
+        ✅ FIXED: Now syncs selection state back to virtual tree.
         """
         if folder_id not in self.tree_items:
             self._log(f"ERROR: Folder {folder_id} not found in tree_items")
@@ -1567,18 +1760,27 @@ class SalesforceExporterApp(ctk.CTkToplevel):
             
             self._log(f"❌ Deselected folder: {folder_name}")
         
+        # ✅ Update virtual tree selection state
+        if self.virtual_tree:
+            selected_report_ids = set(self.selected_items.keys())
+            self.virtual_tree.update_selection_state(selected_report_ids)
+        
         # Update selected panel
         self._refresh_selected_panel()
-
+        
+        # Update export button state
+        self._update_export_button_state()
+    
     def _on_report_checkbox_changed_virtual(self, report_id: str, report_name: str, folder_id: str, checkbox_var: ctk.BooleanVar):
         """
         Handle individual report checkbox change from virtual tree.
-        ✅ NEW: Callback for virtual tree view.
+        ✅ FIXED: Now syncs selection state back to virtual tree.
         """
         is_checked = checkbox_var.get()
         folder_name = self.tree_items.get(folder_id, {}).get("folder_name", "Unknown")
         
         if is_checked:
+            # Add to selection
             self.selected_items[report_id] = {
                 "type": "report",
                 "name": report_name,
@@ -1587,17 +1789,42 @@ class SalesforceExporterApp(ctk.CTkToplevel):
             }
             self._log(f"✅ Selected: {report_name}")
         else:
+            # Remove from selection
             if report_id in self.selected_items:
                 del self.selected_items[report_id]
             self._log(f"❌ Deselected: {report_name}")
         
+        # ✅ Update virtual tree selection state (updates folder checkbox too)
+        if self.virtual_tree:
+            selected_report_ids = set(self.selected_items.keys())
+            self.virtual_tree.update_selection_state(selected_report_ids)
+        
         # Update selected panel
         self._refresh_selected_panel()
+        
+        # Update export button state
+        self._update_export_button_state()
+
+
+    def _on_report_checkbox_changed(self, report_id: str, report_name: str, folder_id: str, checkbox_var: ctk.BooleanVar):
+        """
+        Handle individual report checkbox change - LEGACY METHOD.
+        
+        ✅ FIXED: Always redirects to virtual tree handler (no legacy code).
+        This method exists only for backward compatibility.
+        """
+        # Always use virtual tree handler
+        if self.virtual_tree:
+            return self._on_report_checkbox_changed_virtual(report_id, report_name, folder_id, checkbox_var)
+        
+        # Fallback if virtual tree doesn't exist (should never happen)
+        self._log("⚠️ Warning: Virtual tree not initialized")
+
 
     def _on_folder_expand_virtual(self, folder_id: str):
         """
         Handle folder expand/collapse from virtual tree.
-        ✅ NEW: Callback for virtual tree view.
+        ✅ Callback for virtual tree view.
         """
         # Virtual tree handles the UI, we just log it
         if folder_id in self.tree_items:
@@ -1609,87 +1836,20 @@ class SalesforceExporterApp(ctk.CTkToplevel):
             else:
                 self._log(f"📁 Collapsed: {folder_name}")
         
-        
-    def _toggle_folder_expansion(self, folder_id: str):
-        """
-        Toggle folder expansion.
-        ✅ UPDATED: Now delegates to virtual tree view.
-        """
-        if not self.virtual_tree:
-            return
-        
-        # Virtual tree handles the UI
-        # This method kept for compatibility but does nothing
-        # The virtual tree's own expand handler is used instead
-        pass
-
-    def _sync_folder_checkboxes(self, folder_id: str):
-        """
-        Sync report checkboxes with actual selection state.
-        ✅ UPDATED: Works with virtual tree view.
-        """
-        if not self.virtual_tree:
-            return
-        
-        # Virtual tree will handle checkbox sync on next render
-        # Force re-render of visible items to update checkbox states
-        self.virtual_tree._render_visible_items()
     
     def _on_folder_checkbox_changed(self, folder_id: str, checkbox_var: ctk.BooleanVar):
         """
         Handle folder checkbox change - LEGACY METHOD.
-        ✅ UPDATED: Redirects to virtual tree handler if using virtual tree.
+        
+        ✅ FIXED: Always redirects to virtual tree handler (no legacy code).
+        This method exists only for backward compatibility.
         """
-        # If using virtual tree, redirect to new handler
+        # Always use virtual tree handler
         if self.virtual_tree:
             return self._on_folder_checkbox_changed_virtual(folder_id, checkbox_var)
         
-        # Old implementation (kept for compatibility if virtual tree not initialized)
-        if folder_id not in self.tree_items:
-            self._log(f"ERROR: Folder {folder_id} not found in tree_items")
-            return
-        
-        is_checked = checkbox_var.get()
-        tree_item = self.tree_items[folder_id]
-        reports = tree_item.get("reports", [])
-        folder_name = tree_item.get("folder_name", "Unknown")
-        
-        if not reports:
-            self._log(f"⚠️ No reports in folder: {folder_name}")
-            checkbox_var.set(False)
-            return
-        
-        report_checkboxes = tree_item.get("report_checkboxes", {})
-        
-        if is_checked:
-            for report in reports:
-                report_id = report.get("id")
-                report_name = report.get("name", "Unnamed Report")
-                
-                self.selected_items[report_id] = {
-                    "type": "report",
-                    "name": report_name,
-                    "folder_id": folder_id,
-                    "folder_name": folder_name
-                }
-                
-                if report_id in report_checkboxes:
-                    report_checkboxes[report_id]["checkbox_var"].set(True)
-            
-            self._log(f"✅ Selected folder: {folder_name} ({len(reports)} reports)")
-        else:
-            for report in reports:
-                report_id = report.get("id")
-                
-                if report_id in self.selected_items:
-                    del self.selected_items[report_id]
-                
-                if report_id in report_checkboxes:
-                    report_checkboxes[report_id]["checkbox_var"].set(False)
-            
-            self._log(f"❌ Deselected folder: {folder_name}")
-        
-        self._refresh_selected_panel()
+        # Fallback if virtual tree doesn't exist (should never happen)
+        self._log("⚠️ Warning: Virtual tree not initialized")
     
     def _on_report_checkbox_changed(self, report_id: str, report_name: str, folder_id: str, checkbox_var: ctk.BooleanVar):
         """
@@ -1722,21 +1882,6 @@ class SalesforceExporterApp(ctk.CTkToplevel):
         
         self._refresh_selected_panel()
     
-    def _on_left_search(self, event):
-        """Handle search in left panel with debouncing"""
-        
-        # Cancel previous timer if it exists
-        if self.search_timer is not None:
-            self.after_cancel(self.search_timer)
-        
-        # Set new timer - wait 300ms after user stops typing
-        self.search_timer = self.after(300, self._execute_search)
-
-    def _execute_search(self):
-        """Execute the actual search after debounce delay"""
-        search_term = self.left_search_entry.get().strip()
-        self._populate_tree(search_term)  # ✅ Passes search_term
-        self.search_timer = None
     
     # ===== SELECTED PANEL MANAGEMENT =====
     
@@ -1836,62 +1981,60 @@ class SalesforceExporterApp(ctk.CTkToplevel):
         self._update_export_button_state()
             
     def _remove_item_from_selected(self, item_id: str):
-        """Remove a single item from selected panel"""
+        """
+        Remove a single item from selected panel.
         
+        ✅ FIXED: Works with virtual tree view (no direct checkbox access).
+        """
         if item_id not in self.selected_items:
             return
         
         item_data = self.selected_items[item_id]
-        folder_id = item_data.get("folder_id")
+        item_name = item_data.get("name", "Unknown")
         
         # Remove from selected items
         del self.selected_items[item_id]
         
-        # Uncheck the checkbox in tree
-        if folder_id in self.tree_items:
-            report_checkboxes = self.tree_items[folder_id].get("report_checkboxes", {})
-            if item_id in report_checkboxes:
-                report_checkboxes[item_id]["checkbox_var"].set(False)
-            
-            # Also uncheck folder checkbox
-            self.tree_items[folder_id]["checkbox_var"].set(False)
+        self._log(f"❌ Removed: {item_name}")
         
-        self._log(f"❌ Removed: {item_data.get('name', 'Unknown')}")
+        # ✅ Update virtual tree selection state (this will uncheck the checkbox)
+        if self.virtual_tree:
+            selected_report_ids = set(self.selected_items.keys())
+            self.virtual_tree.update_selection_state(selected_report_ids)
         
-        # Refresh panel
+        # Refresh selected panel
         self._refresh_selected_panel()
+        
+        # Update export button state
+        self._update_export_button_state()
     
     # ===== ACTION BUTTONS =====
     
     def _clear_all_selected(self):
-        """Clear all selected items"""
+        """
+        Clear all selected items.
+        
+        ✅ FIXED: Works with virtual tree view (no direct checkbox access).
+        """
         if not self.selected_items:
             return
         
         count = len(self.selected_items)
         
-        # ✅ UPDATED: Clear selected items first
+        # Clear selected items dictionary
         self.selected_items.clear()
-        
-        # ✅ UPDATED: If using virtual tree, force re-render to update checkboxes
-        if self.virtual_tree:
-            self.virtual_tree._render_visible_items()
-        else:
-            # Old method: Uncheck all checkboxes in tree
-            for item_id, item_data in list(self.selected_items.items()):
-                folder_id = item_data.get("folder_id")
-                
-                if folder_id in self.tree_items:
-                    report_checkboxes = self.tree_items[folder_id].get("report_checkboxes", {})
-                    if item_id in report_checkboxes:
-                        report_checkboxes[item_id]["checkbox_var"].set(False)
-                    
-                    self.tree_items[folder_id]["checkbox_var"].set(False)
         
         self._log(f"🗑️ Cleared all selections ({count} reports)")
         
-        # Refresh panel
+        # ✅ Update virtual tree selection state (this will uncheck all checkboxes)
+        if self.virtual_tree:
+            self.virtual_tree.update_selection_state(set())  # Empty set = nothing selected
+        
+        # Refresh selected panel
         self._refresh_selected_panel()
+        
+        # Update export button state
+        self._update_export_button_state()
     
     def _reset_all_selections(self):
         """Reset all selections - same as clear all"""
@@ -2626,12 +2769,14 @@ class SalesforceExporterApp(ctk.CTkToplevel):
                     event_type = item[0]
                     data = item[1] if len(item) > 1 else None
                     
-                    if event_type == "data_loaded":
+                    if event_type == "search_complete":
+                        self._on_search_complete(data)
+                    elif event_type == "search_error":
+                        self._on_search_error(data)
+                    elif event_type == "search_cancelled":
+                        self._on_search_cancelled()
+                    elif event_type == "data_loaded":
                         self._on_data_loaded(data)
-                    elif event_type == "loading_progress":
-                        self._on_loading_progress(data)
-                    elif event_type == "loading_cancelled":  # ✅ NEW
-                        self._on_loading_cancelled()
                     elif event_type == "data_error":
                         self._on_data_error(data)
                     elif event_type == "progress_with_name":
