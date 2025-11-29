@@ -149,6 +149,10 @@ class SalesforceExporterApp(ctk.CTkToplevel):
         self._export_state = "idle"  # ← NEW: Single state variable
         self._showing_dialog = False  # ← Dialog flag
         
+        # ✅ NEW: Search results cache
+        self.search_cache: Dict[str, Dict] = {}  # {keyword: {folders, reports_by_folder}}
+        self.search_cache_max_size = 10  # Keep last 10 searches
+        
         # Thread Safety - Initialize locks early
         self.data_lock = threading.RLock()
         self.ui_lock = threading.RLock()
@@ -216,7 +220,8 @@ class SalesforceExporterApp(ctk.CTkToplevel):
         self.bind('<Configure>', self._on_window_configure)
         
         # Auto-load data after UI is ready
-        self.after(500, self._auto_load_data_on_startup)
+        self.after(500, self._show_welcome_message)
+        
     
     def _cancel_export_safe(self):
         """
@@ -1033,10 +1038,10 @@ class SalesforceExporterApp(ctk.CTkToplevel):
     
     # ===== LOAD FOLDERS AND REPORTS =====
     
-    def _auto_load_data_on_startup(self):
+    def _show_welcome_message(self):
         """
-        Show welcome message and instructions - NO auto-loading.
-        User must search to load data.
+        Show welcome message and search instructions on startup.
+        No data is loaded until user performs a search.
         """
         if not self.session_info:
             self._log("⚠️ No session info available")
@@ -1133,16 +1138,26 @@ class SalesforceExporterApp(ctk.CTkToplevel):
         """
         Handle search completion and populate tree with results.
         
-        Args:
-            result: Dictionary containing:
-                - folders: List of folder metadata
-                - reports_by_folder: Dict mapping folder_id to list of reports
-                - keyword: The search keyword used
+        ✅ FIXED: Preserves selections across different searches (no auto-clearing).
         """
         # Extract data
         folders = result.get("folders", [])
         reports_by_folder = result.get("reports_by_folder", {})
         keyword = result.get("keyword", "")
+        
+        # ✅ Cache the results
+        keyword_lower = keyword.lower()
+        self.search_cache[keyword_lower] = {
+            "folders": folders,
+            "reports_by_folder": reports_by_folder,
+            "keyword": keyword
+        }
+        
+        # ✅ Limit cache size (LRU-style)
+        if len(self.search_cache) > self.search_cache_max_size:
+            # Remove oldest entry
+            oldest_key = next(iter(self.search_cache))
+            del self.search_cache[oldest_key]
         
         # Update data storage
         with self.data_lock:
@@ -1175,7 +1190,11 @@ class SalesforceExporterApp(ctk.CTkToplevel):
         # Populate tree with results
         self._log(f"📊 Displaying {total_folders} folders with {total_reports} reports")
         
-        # Use existing populate_tree method (no search_term needed - data is already filtered)
+        # ✅ REMOVED: Don't filter out selections anymore!
+        # Users might want to export reports from multiple searches
+        # They can manually clear if needed using "Clear All Selected" button
+        
+        # Use existing populate_tree method
         self._populate_tree("")
         
         # Re-enable search
@@ -1420,8 +1439,7 @@ class SalesforceExporterApp(ctk.CTkToplevel):
     
     def _on_search_button_clicked(self):
         """
-        Handle search button click.
-        Validates input and triggers backend search with threading.
+        Handle search button click with caching.
         """
         # Get search keyword
         keyword = self.left_search_entry.get().strip()
@@ -1448,7 +1466,16 @@ class SalesforceExporterApp(ctk.CTkToplevel):
             messagebox.showerror("Not Logged In", "Please login first.")
             return
         
-        # Start search
+        # ✅ NEW: Check cache first
+        keyword_lower = keyword.lower()
+        if keyword_lower in self.search_cache:
+            self._log(f"⚡ Using cached results for: '{keyword}'")
+            cached_result = self.search_cache[keyword_lower]
+            cached_result["keyword"] = keyword  # Update display keyword
+            self._on_search_complete(cached_result)
+            return
+        
+        # Not in cache - perform search
         self._log(f"🔍 Searching for: '{keyword}'")
         self._start_search(keyword)
         
@@ -1514,69 +1541,7 @@ class SalesforceExporterApp(ctk.CTkToplevel):
         )
         thread.start()
     
-    
-    def _on_data_loaded(self, data: Dict):
-        """Handle data loaded successfully - with virtual tree rendering"""
-        
-        with self.data_lock:
-            self.available_folders = data.get("folders", [])
-            self.available_reports = data.get("reports", [])
-            self.reports_by_folder = data.get("reports_by_folder", {})
-        
-        # Filter out system folders
-        filtered_folders = [
-            f for f in self.available_folders
-            if f.get("name") and f.get("name") not in ["Automated Process", "System", "Hidden"]
-            and not f.get("name").startswith("__")
-        ]
-        
-        with self.data_lock:
-            self.available_folders = filtered_folders
-        
-        # Count total reports
-        total_reports_in_folders = sum(len(reports) for reports in self.reports_by_folder.values())
-        
-        # Clear loading indicator
-        for widget in self.tree_container.winfo_children():
-            widget.destroy()
-        
-        # ✅ IMPROVED: Show brief message, then populate immediately
-        temp_label = ctk.CTkLabel(
-            self.tree_container,
-            text=f"📊 Loading {len(filtered_folders)} folders with {total_reports_in_folders} reports...",
-            text_color="gray",
-            font=ctk.CTkFont(size=11)
-        )
-        temp_label.grid(row=0, column=0, pady=20)
-        
-        # ✅ NEW: Populate tree using virtual scrolling (NO DELAY NEEDED!)
-        # Virtual scrolling renders instantly because it only creates visible items
-        self.after(100, lambda: self._populate_tree_with_data(filtered_folders, total_reports_in_folders))
-        
-        # Re-enable button
-        # Populate tree (virtual scrolling makes this instant!)
-        self._populate_tree("")
-        
-        # Log results with statistics
-        self._log("=" * 50)
-        self._log(f"✅ DATA LOADING COMPLETE")
-        self._log(f"📁 Folders Loaded: {len(filtered_folders)}")
-        self._log(f"📄 Total Reports: {total_reports_in_folders}")
-        
-        if total_reports_in_folders > 0:
-            avg_reports_per_folder = total_reports_in_folders / len(filtered_folders) if len(filtered_folders) > 0 else 0
-            self._log(f"📊 Average Reports/Folder: {avg_reports_per_folder:.1f}")
-        
-        if total_reports_in_folders == 0:
-            self._log("⚠️ WARNING: No reports found. Check folder permissions.")
-        
-        self._log("=" * 50)
-        
-        # Reset state
-        self._set_ui_state("idle")
-        
-        # Update export button state after loading
-        self._update_export_button_state()
+
 
     def _populate_tree_with_data(self, filtered_folders, total_reports_in_folders):
         """
@@ -1605,11 +1570,6 @@ class SalesforceExporterApp(ctk.CTkToplevel):
         
         self._log("=" * 50)
         
-    def _on_data_error(self, error: str):
-        """Handle data loading error"""
-        self._log(f"❌ Error loading data: {error}")
-        self._set_ui_state("idle")
-        messagebox.showerror("Error", f"Failed to load folders and reports:\n\n{error}")
     
     # ===== TREE VIEW POPULATION =====
     
@@ -2312,36 +2272,44 @@ class SalesforceExporterApp(ctk.CTkToplevel):
         self._start_export()
         
     def _export_worker(self, report_ids: List[str]):
-        """Background worker for export with concurrent downloads"""
+        """
+        Background worker for export with concurrent downloads.
+        
+        ✅ OPTIMIZED: Passes report metadata to avoid redundant API calls.
+        """
         try:
             session_id = self.session_info.get("session_id")
             instance_url = self.session_info.get("instance_url")
             
+            # ✅ NEW: Build metadata dict from already-loaded data
+            reports_metadata = {}
+            
+            with self.data_lock:
+                # Extract metadata from reports_by_folder (already have this!)
+                for folder_id, reports in self.reports_by_folder.items():
+                    for report in reports:
+                        report_id = report.get("id")
+                        if report_id in report_ids:
+                            reports_metadata[report_id] = {
+                                "id": report_id,
+                                "name": report.get("name", report_id),
+                                "reportFormat": report.get("reportFormat", "TABULAR")
+                            }
+            
             def progress_callback(done, total, report_name=None):
-                """
-                Progress callback - called when report starts/completes
-                Args:
-                    done: Number of reports completed
-                    total: Total reports to export
-                    report_name: Optional name of report being downloaded
-                """
-                # If report_name provided, download is STARTING
+                """Progress callback - called when report starts/completes"""
                 if report_name:
-                    # Update UI with current report name
                     self.update_queue.put(("progress_with_name", (done, total, report_name)))
-                    # Log start
-                    self.update_queue.put(("log", f"  📥 Downloading: {report_name}"))
+                    self.update_queue.put(("log", f"  🔥 Downloading: {report_name}"))
                     return
                 
-                # Report COMPLETED - update progress
                 self.update_queue.put(("progress", (done, total)))
                 
-                # Log completion immediately
                 if done > 0 and done <= total:
                     percentage = int((done / total) * 100)
                     speed = self.progress_tracker.get_speed()
                     
-                    if speed > 0.5:  # Show speed if meaningful
+                    if speed > 0.5:
                         self.update_queue.put(("log", f"  ✅ Completed: {done}/{total} ({percentage}%) • {speed:.1f} reports/sec"))
                     else:
                         self.update_queue.put(("log", f"  ✅ Completed: {done}/{total} ({percentage}%)"))
@@ -2352,13 +2320,22 @@ class SalesforceExporterApp(ctk.CTkToplevel):
                 progress_callback=progress_callback
             )
             
-            # Use concurrent export method
+            # Log export start
+            self.update_queue.put(("log", f"🚀 Starting concurrent export of {len(report_ids)} reports..."))
+            
+            # Check cancellation before export
+            if self.export_cancel_event.is_set():
+                self.update_queue.put(("export_cancelled", None))
+                return
+            
+            # ✅ OPTIMIZED: Pass metadata to avoid redundant API calls
             result = exporter.export_selected_reports_to_zip_concurrent(
                 self.output_zip_path,
                 report_ids,
-                max_workers=5,  # 5 parallel downloads
+                max_workers=10,
                 cancel_event=self.export_cancel_event,
-                retry_attempts=3  # Retry 3 times on failure
+                retry_attempts=3,
+                reports_metadata=reports_metadata  # ✅ NEW: Pass cached metadata
             )
             
             self.update_queue.put(("export_complete", result))
@@ -2776,10 +2753,6 @@ class SalesforceExporterApp(ctk.CTkToplevel):
                         self._on_search_error(data)
                     elif event_type == "search_cancelled":
                         self._on_search_cancelled()
-                    elif event_type == "data_loaded":
-                        self._on_data_loaded(data)
-                    elif event_type == "data_error":
-                        self._on_data_error(data)
                     elif event_type == "progress_with_name":
                         self._on_export_progress_with_name(data)
                     elif event_type == "progress":

@@ -1053,16 +1053,13 @@ class SalesforceReportExporter:
         report_ids: List[str],
         max_workers: int = 5,
         cancel_event: Optional[Any] = None,
-        retry_attempts: int = 3
+        retry_attempts: int = 3,
+        reports_metadata: Optional[Dict[str, Dict]] = None  # ✅ NEW: Accept metadata
     ) -> Dict[str, Any]:
         """
         Export specific selected reports to a ZIP file using CONCURRENT downloads.
         
-        NEW FEATURES:
-        - Downloads 5 reports in parallel (5-10x faster)
-        - Can be cancelled mid-export
-        - Retries failed reports up to 3 times
-        - Saves partial exports on cancellation
+        ✅ OPTIMIZED: Accepts pre-fetched metadata to avoid redundant API calls.
         
         Args:
             output_zip_path: Path where ZIP file will be saved
@@ -1070,6 +1067,7 @@ class SalesforceReportExporter:
             max_workers: Number of parallel downloads (default 5)
             cancel_event: Threading event to signal cancellation
             retry_attempts: Number of retry attempts for failed reports
+            reports_metadata: Optional dict of {report_id: {name, format}} to skip metadata fetch
             
         Returns:
             Dictionary with export results
@@ -1080,45 +1078,61 @@ class SalesforceReportExporter:
         tmp_dir = Path(tempfile.mkdtemp(prefix="sf_reports_"))
         
         try:
-            # Fetch report metadata
-            if not report_ids:
+            # ✅ OPTIMIZED: Use provided metadata if available, else fetch
+            if reports_metadata:
+                # Use cached metadata (saves API calls!)
                 reports = []
+                for report_id in report_ids:
+                    if report_id in reports_metadata:
+                        reports.append(reports_metadata[report_id])
+                    else:
+                        # Fallback: create basic entry
+                        reports.append({
+                            "id": report_id,
+                            "name": report_id,
+                            "reportFormat": "TABULAR"
+                        })
             else:
-                chunk_size = 100
-                reports = []
-                
-                for i in range(0, len(report_ids), chunk_size):
-                    # Check for cancellation
-                    if cancel_event and cancel_event.is_set():
-                        raise Exception("Export cancelled by user")
+                # Fallback: Fetch metadata if not provided (OLD BEHAVIOR)
+                if not report_ids:
+                    reports = []
+                else:
+                    chunk_size = 100
+                    reports = []
                     
-                    chunk_ids = report_ids[i:i + chunk_size]
-                    ids_formatted = ",".join([f"'{rid}'" for rid in chunk_ids])
-                    
-                    base_query = f"""
-                        SELECT Id, Name, Format 
-                        FROM Report 
-                        WHERE Id IN ({ids_formatted})
-                    """
-                    
-                    try:
-                        chunk_records = self._query_with_pagination(base_query.strip(), batch_size=2000)
+                    for i in range(0, len(report_ids), chunk_size):
+                        # Check for cancellation
+                        if cancel_event and cancel_event.is_set():
+                            raise Exception("Export cancelled by user")
                         
-                        for record in chunk_records:
-                            reports.append({
-                                "id": record.get("Id"),
-                                "name": record.get("Name"),
-                                "reportFormat": record.get("Format", "TABULAR")
-                            })
-                    except Exception as e:
-                        print(f"Error fetching report chunk: {str(e)}")
-                        for rid in chunk_ids:
-                            reports.append({
-                                "id": rid,
-                                "name": rid,
-                                "reportFormat": "TABULAR"
-                            })
+                        chunk_ids = report_ids[i:i + chunk_size]
+                        ids_formatted = ",".join([f"'{rid}'" for rid in chunk_ids])
+                        
+                        base_query = f"""
+                            SELECT Id, Name, Format 
+                            FROM Report 
+                            WHERE Id IN ({ids_formatted})
+                        """
+                        
+                        try:
+                            chunk_records = self._query_with_pagination(base_query.strip(), batch_size=2000)
+                            
+                            for record in chunk_records:
+                                reports.append({
+                                    "id": record.get("Id"),
+                                    "name": record.get("Name"),
+                                    "reportFormat": record.get("Format", "TABULAR")
+                                })
+                        except Exception as e:
+                            print(f"Error fetching report chunk: {str(e)}")
+                            for rid in chunk_ids:
+                                reports.append({
+                                    "id": rid,
+                                    "name": rid,
+                                    "reportFormat": "TABULAR"
+                                })
             
+            # Rest of the method stays the same...
             total = len(reports)
             completed = 0
             failed: List[Dict[str, Any]] = []
