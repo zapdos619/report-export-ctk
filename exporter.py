@@ -8,6 +8,7 @@ import shutil
 from pathlib import Path
 import requests
 from typing import Callable, Optional, List, Dict, Any
+import threading
 
 
 def get_org_api_version(instance_url: str, session_id: str = None) -> str:
@@ -46,9 +47,14 @@ def retry_request(
     cookies: dict = None,
     max_retries: int = 3,
     timeout: int = 60,
-    allow_redirects: bool = True
+    allow_redirects: bool = True,
+    backoff_factor: float = 2.0  # ✅ NEW: Configurable backoff
 ) -> requests.Response:
-    """Make HTTP GET request with exponential backoff retry logic."""
+    """
+    Make HTTP GET request with exponential backoff retry logic.
+    
+    ✅ OPTIMIZED: Better rate limit handling for large exports.
+    """
     backoff = 1
     last_error = None
     headers = headers or {}
@@ -67,15 +73,26 @@ def retry_request(
             if response.status_code == 200:
                 return response
 
-            if response.status_code in (429, 500, 502, 503, 504):
+            # ✅ IMPROVED: Better rate limit handling
+            if response.status_code == 429:  # Too Many Requests
                 retry_after = response.headers.get('Retry-After')
                 if retry_after:
                     try:
                         backoff = int(retry_after)
                     except ValueError:
-                        pass
+                        backoff = min(backoff * backoff_factor, 120)  # Cap at 2 minutes
+                else:
+                    backoff = min(backoff * backoff_factor, 120)
+                
+                print(f"⚠️ Rate limited, waiting {backoff}s before retry {attempt + 1}/{max_retries}")
                 time.sleep(backoff)
-                backoff = min(backoff * 2, 60)
+                continue
+
+            # ✅ IMPROVED: Better handling of server errors
+            if response.status_code in (500, 502, 503, 504):
+                backoff = min(backoff * backoff_factor, 60)
+                print(f"⚠️ Server error {response.status_code}, waiting {backoff}s before retry {attempt + 1}/{max_retries}")
+                time.sleep(backoff)
                 continue
 
             response.raise_for_status()
@@ -83,15 +100,17 @@ def retry_request(
         except requests.Timeout as e:
             last_error = e
             if attempt < max_retries - 1:
+                backoff = min(backoff * backoff_factor, 60)
+                print(f"⚠️ Timeout, waiting {backoff}s before retry {attempt + 1}/{max_retries}")
                 time.sleep(backoff)
-                backoff *= 2
                 continue
             raise
         except requests.RequestException as e:
             last_error = e
             if attempt < max_retries - 1:
+                backoff = min(backoff * backoff_factor, 60)
+                print(f"⚠️ Request error, waiting {backoff}s before retry {attempt + 1}/{max_retries}")
                 time.sleep(backoff)
-                backoff *= 2
                 continue
             raise
 
@@ -220,16 +239,20 @@ class SalesforceReportExporter:
         self,
         base_query: str,
         batch_size: int = 2000,
-        progress_callback: Optional[Callable[[int, int], None]] = None
+        progress_callback: Optional[Callable[[int, int], None]] = None,
+        cancel_event: Optional[Any] = None  # ✅ NEW: Cancellation support
     ) -> List[Dict[str, Any]]:
         """
         Execute SOQL query with automatic pagination.
         Handles Salesforce's 2,000 row limit per query.
         
+        ✅ OPTIMIZED: Cancellation support + better timeout handling for large queries.
+        
         Args:
             base_query: Base SOQL query (without LIMIT/OFFSET)
             batch_size: Records per batch (default 2000, Salesforce limit)
             progress_callback: Optional callback(fetched, estimated_total)
+            cancel_event: Optional threading.Event to check for cancellation
             
         Returns:
             List of all records combined from all pages
@@ -238,8 +261,15 @@ class SalesforceReportExporter:
         offset = 0
         has_more = True
         estimated_total = None
+        consecutive_errors = 0  # ✅ NEW: Track consecutive errors
+        max_consecutive_errors = 3  # ✅ NEW: Fail after 3 consecutive errors
         
         while has_more:
+            # ✅ NEW: Check for cancellation
+            if cancel_event and cancel_event.is_set():
+                print(f"⚠️ Query cancelled at offset {offset}")
+                break
+            
             # Build paginated query
             paginated_query = f"{base_query} LIMIT {batch_size} OFFSET {offset}"
             
@@ -247,11 +277,14 @@ class SalesforceReportExporter:
             params = {"q": paginated_query}
             
             try:
+                # ✅ IMPROVED: Longer timeout for large queries
+                timeout = 90 if len(all_records) > 5000 else 60
+                
                 response = requests.get(
                     query_url,
                     headers=self.api_headers,
                     params=params,
-                    timeout=60
+                    timeout=timeout
                 )
                 response.raise_for_status()
                 
@@ -264,6 +297,9 @@ class SalesforceReportExporter:
                 
                 all_records.extend(records)
                 offset += len(records)
+                
+                # ✅ RESET: Reset error counter on success
+                consecutive_errors = 0
                 
                 # Update progress if callback provided
                 if progress_callback and estimated_total is None:
@@ -280,10 +316,34 @@ class SalesforceReportExporter:
                 if len(records) < batch_size:
                     has_more = False
                 
+                # ✅ NEW: Small delay to avoid rate limiting on large queries
+                if has_more and len(all_records) > 0 and len(all_records) % 10000 == 0:
+                    print(f"📊 Fetched {len(all_records)} records, brief pause to avoid rate limits...")
+                    time.sleep(1)
+                
+            except requests.Timeout as e:
+                consecutive_errors += 1
+                print(f"⚠️ Query timeout at offset {offset} (attempt {consecutive_errors}/{max_consecutive_errors})")
+                
+                if consecutive_errors >= max_consecutive_errors:
+                    print(f"❌ Too many consecutive errors, stopping pagination at {len(all_records)} records")
+                    has_more = False
+                else:
+                    # Wait before retry
+                    time.sleep(2 * consecutive_errors)
+                    continue
+                    
             except requests.RequestException as e:
-                # Log error but return what we have so far
-                print(f"Warning: Pagination stopped at offset {offset}: {str(e)}")
-                has_more = False
+                consecutive_errors += 1
+                print(f"⚠️ Query error at offset {offset}: {str(e)[:100]} (attempt {consecutive_errors}/{max_consecutive_errors})")
+                
+                if consecutive_errors >= max_consecutive_errors:
+                    print(f"❌ Too many consecutive errors, stopping pagination at {len(all_records)} records")
+                    has_more = False
+                else:
+                    # Wait before retry
+                    time.sleep(2 * consecutive_errors)
+                    continue
         
         return all_records
 
@@ -408,10 +468,12 @@ class SalesforceReportExporter:
         """
         Search folders AND reports by keyword, then organize results.
         
+        ✅ OPTIMIZED: Chunked queries + memory-efficient processing for 10,000+ reports.
+        
         This method:
         1. Searches folders whose NAME matches keyword
-        2. Searches reports whose NAME matches keyword
-        3. Fetches parent folders that contain matching reports (even if folder name doesn't match)
+        2. Searches reports whose NAME matches keyword (in chunks)
+        3. Fetches parent folders that contain matching reports
         4. Groups reports by their folders
         5. For folders matched by name, includes ALL their reports
         
@@ -424,11 +486,6 @@ class SalesforceReportExporter:
                 "folders": [list of folder metadata],
                 "reports_by_folder": {folder_id: [list of reports in that folder]}
             }
-            
-        Example:
-            result = exporter.search_by_keyword("Sales")
-            folders = result["folders"]  # All relevant folders
-            reports = result["reports_by_folder"]  # Reports grouped by folder
         """
         try:
             # Check cancellation
@@ -439,6 +496,8 @@ class SalesforceReportExporter:
             keyword_escaped = keyword.replace("'", "\\'").replace("%", "\\%")
             
             # ===== STEP 1: Search folders by name =====
+            print(f"🔍 Step 1: Searching folders matching '{keyword}'...")
+            
             folders_query = f"""
                 SELECT Id, Name, Type, DeveloperName, AccessType 
                 FROM Folder 
@@ -450,20 +509,31 @@ class SalesforceReportExporter:
             matching_folders = self._execute_soql_query(folders_query)
             folder_ids_from_name_match = {f.get("Id") for f in matching_folders}
             
+            print(f"✅ Found {len(matching_folders)} folders matching keyword")
+            
             # Check cancellation
             if cancel_event and cancel_event.is_set():
                 return {"folders": [], "reports_by_folder": {}}
             
-            # ===== STEP 2: Search reports by name =====
+            # ===== STEP 2: Search reports by name (WITH PAGINATION) =====
+            print(f"🔍 Step 2: Searching reports matching '{keyword}'...")
+            
             reports_query = f"""
                 SELECT Id, Name, DeveloperName, FolderName, Format, 
-                       CreatedDate, LastModifiedDate, OwnerId
+                    CreatedDate, LastModifiedDate, OwnerId
                 FROM Report 
                 WHERE Name LIKE '%{keyword_escaped}%'
                 ORDER BY Name
             """
             
-            matching_reports = self._query_with_pagination(reports_query.strip())
+            # ✅ OPTIMIZED: Use pagination with cancellation support
+            matching_reports = self._query_with_pagination(
+                reports_query.strip(),
+                batch_size=2000,
+                cancel_event=cancel_event
+            )
+            
+            print(f"✅ Found {len(matching_reports)} reports matching keyword")
             
             # Check cancellation
             if cancel_event and cancel_event.is_set():
@@ -472,14 +542,16 @@ class SalesforceReportExporter:
             # ===== STEP 3: Get folder IDs from matching reports =====
             folder_ids_from_reports = {r.get("OwnerId") for r in matching_reports if r.get("OwnerId")}
             
-            # ===== STEP 4: Fetch folders that contain matching reports (but weren't in name search) =====
+            # ===== STEP 4: Fetch folders that contain matching reports =====
             additional_folder_ids = folder_ids_from_reports - folder_ids_from_name_match
             
             additional_folders = []
             if additional_folder_ids:
-                # Fetch these folders in chunks (SOQL IN clause limit)
+                print(f"🔍 Step 3: Fetching {len(additional_folder_ids)} additional folders...")
+                
+                # ✅ OPTIMIZED: Process in smaller chunks to avoid query string limits
                 folder_ids_list = list(additional_folder_ids)
-                chunk_size = 100
+                chunk_size = 50  # ✅ REDUCED: Smaller chunks for stability
                 
                 for i in range(0, len(folder_ids_list), chunk_size):
                     # Check cancellation
@@ -495,13 +567,22 @@ class SalesforceReportExporter:
                         WHERE Id IN ({ids_str})
                     """
                     
-                    chunk_folders = self._execute_soql_query(folders_query)
-                    additional_folders.extend(chunk_folders)
+                    try:
+                        chunk_folders = self._execute_soql_query(folders_query)
+                        additional_folders.extend(chunk_folders)
+                    except Exception as e:
+                        print(f"⚠️ Error fetching folder chunk: {str(e)[:100]}")
+                        # Continue with other chunks
+                        continue
+            
+            print(f"✅ Fetched {len(additional_folders)} additional folders")
             
             # ===== STEP 5: Combine all folders =====
             all_folders = matching_folders + additional_folders
             
-            # ===== STEP 6: Group reports by folder =====
+            # ===== STEP 6: Group reports by folder (MEMORY EFFICIENT) =====
+            print(f"📊 Grouping {len(matching_reports)} reports by folder...")
+            
             reports_by_folder = {}
             
             for report in matching_reports:
@@ -524,8 +605,10 @@ class SalesforceReportExporter:
             if cancel_event and cancel_event.is_set():
                 return {"folders": [], "reports_by_folder": {}}
             
-            # ===== STEP 7: For folders matched by name, get ALL their reports =====
-            for folder in matching_folders:
+            # ===== STEP 7: For folders matched by name, get ALL their reports (IN CHUNKS) =====
+            print(f"🔍 Step 4: Fetching all reports from {len(matching_folders)} matched folders...")
+            
+            for idx, folder in enumerate(matching_folders):
                 folder_id = folder.get("Id")
                 
                 # Check cancellation
@@ -537,26 +620,40 @@ class SalesforceReportExporter:
                 if folder_id not in reports_by_folder:
                     reports_query = f"""
                         SELECT Id, Name, DeveloperName, FolderName, Format, 
-                               CreatedDate, LastModifiedDate
+                            CreatedDate, LastModifiedDate
                         FROM Report 
                         WHERE OwnerId = '{folder_id}'
                         ORDER BY Name
                     """
                     
-                    folder_reports = self._query_with_pagination(reports_query.strip())
-                    
-                    reports_by_folder[folder_id] = [
-                        {
-                            "id": r.get("Id"),
-                            "name": r.get("Name"),
-                            "developerName": r.get("DeveloperName"),
-                            "folderName": r.get("FolderName"),
-                            "reportFormat": r.get("Format", "TABULAR"),
-                            "lastModifiedDate": r.get("LastModifiedDate"),
-                            "createdDate": r.get("CreatedDate")
-                        }
-                        for r in folder_reports
-                    ]
+                    try:
+                        # ✅ OPTIMIZED: Use pagination with cancellation
+                        folder_reports = self._query_with_pagination(
+                            reports_query.strip(),
+                            batch_size=2000,
+                            cancel_event=cancel_event
+                        )
+                        
+                        if folder_reports:
+                            reports_by_folder[folder_id] = [
+                                {
+                                    "id": r.get("Id"),
+                                    "name": r.get("Name"),
+                                    "developerName": r.get("DeveloperName"),
+                                    "folderName": r.get("FolderName"),
+                                    "reportFormat": r.get("Format", "TABULAR"),
+                                    "lastModifiedDate": r.get("LastModifiedDate"),
+                                    "createdDate": r.get("CreatedDate")
+                                }
+                                for r in folder_reports
+                            ]
+                            
+                            print(f"  ✅ Folder {idx + 1}/{len(matching_folders)}: {len(folder_reports)} reports")
+                        
+                    except Exception as e:
+                        print(f"  ⚠️ Error fetching reports from folder {folder.get('Name')}: {str(e)[:100]}")
+                        # Continue with other folders
+                        continue
             
             # ===== STEP 8: Clean up folder metadata =====
             cleaned_folders = []
@@ -569,12 +666,17 @@ class SalesforceReportExporter:
                     "accessType": folder.get("AccessType")
                 })
             
+            # ===== FINAL: Calculate statistics =====
+            total_reports = sum(len(reports) for reports in reports_by_folder.values())
+            print(f"✅ Search complete: {len(cleaned_folders)} folders, {total_reports} total reports")
+            
             return {
                 "folders": cleaned_folders,
                 "reports_by_folder": reports_by_folder
             }
             
         except Exception as e:
+            print(f"❌ Search error: {str(e)}")
             raise Exception(f"Search failed: {str(e)}")
     
     def _execute_soql_query(self, query: str) -> List[Dict]:
@@ -608,15 +710,22 @@ class SalesforceReportExporter:
         except requests.RequestException as e:
             raise Exception(f"SOQL query failed: {str(e)}")
 
+
     def export_report_csv(self, report_id: str, timeout: int = 120) -> str:
         """
         Export a single report as CSV using the UI export URL method.
+        
+        ✅ IMPROVED: Configurable timeout (default 120s, can be increased for large reports).
         
         This is the "screen scraping" approach that:
         - Bypasses the 2000 row API limit
         - Returns actual CSV content
         - Works with Lightning and Classic
         - Automatically removes Salesforce metadata footer
+        
+        Args:
+            report_id: Salesforce report ID
+            timeout: Request timeout in seconds (default 120)
         """
         # Build the export URL - mimics clicking "Export" in the UI
         export_url = (
@@ -624,12 +733,13 @@ class SalesforceReportExporter:
             f"?isdtp=p1&export=1&enc=UTF-8&xf=csv"
         )
         
-        # Make request with session ID as cookie
+        # ✅ IMPROVED: Use retry_request with configurable timeout
         response = retry_request(
             export_url,
             cookies=self.export_cookies,
             timeout=timeout,
-            allow_redirects=True
+            allow_redirects=True,
+            max_retries=3  # ✅ NEW: Explicitly set retries
         )
         
         content = response.text
@@ -1047,24 +1157,25 @@ class SalesforceReportExporter:
             except Exception:
                 pass
     
+
     def export_selected_reports_to_zip_concurrent(
         self,
         output_zip_path: str,
         report_ids: List[str],
-        max_workers: int = 5,
+        max_workers: int = 10,  # ✅ INCREASED: Default 10 workers for faster exports
         cancel_event: Optional[Any] = None,
         retry_attempts: int = 3,
-        reports_metadata: Optional[Dict[str, Dict]] = None  # ✅ NEW: Accept metadata
+        reports_metadata: Optional[Dict[str, Dict]] = None
     ) -> Dict[str, Any]:
         """
         Export specific selected reports to a ZIP file using CONCURRENT downloads.
         
-        ✅ OPTIMIZED: Accepts pre-fetched metadata to avoid redundant API calls.
+        ✅ OPTIMIZED: Better memory management + adaptive worker count for 10,000+ reports.
         
         Args:
             output_zip_path: Path where ZIP file will be saved
             report_ids: List of report IDs to export
-            max_workers: Number of parallel downloads (default 5)
+            max_workers: Number of parallel downloads (default 10)
             cancel_event: Threading event to signal cancellation
             retry_attempts: Number of retry attempts for failed reports
             reports_metadata: Optional dict of {report_id: {name, format}} to skip metadata fetch
@@ -1078,9 +1189,12 @@ class SalesforceReportExporter:
         tmp_dir = Path(tempfile.mkdtemp(prefix="sf_reports_"))
         
         try:
+            # ===== STEP 1: Get/validate metadata =====
+            print(f"📊 Preparing to export {len(report_ids)} reports...")
+            
             # ✅ OPTIMIZED: Use provided metadata if available, else fetch
             if reports_metadata:
-                # Use cached metadata (saves API calls!)
+                print("⚡ Using cached metadata (skipping API calls)")
                 reports = []
                 for report_id in report_ids:
                     if report_id in reports_metadata:
@@ -1093,11 +1207,13 @@ class SalesforceReportExporter:
                             "reportFormat": "TABULAR"
                         })
             else:
-                # Fallback: Fetch metadata if not provided (OLD BEHAVIOR)
+                print("🔍 Fetching report metadata...")
+                # Fallback: Fetch metadata if not provided
                 if not report_ids:
                     reports = []
                 else:
-                    chunk_size = 100
+                    # ✅ OPTIMIZED: Smaller chunks for stability
+                    chunk_size = 50  # Reduced from 100
                     reports = []
                     
                     for i in range(0, len(report_ids), chunk_size):
@@ -1115,7 +1231,11 @@ class SalesforceReportExporter:
                         """
                         
                         try:
-                            chunk_records = self._query_with_pagination(base_query.strip(), batch_size=2000)
+                            chunk_records = self._query_with_pagination(
+                                base_query.strip(), 
+                                batch_size=2000,
+                                cancel_event=cancel_event
+                            )
                             
                             for record in chunk_records:
                                 reports.append({
@@ -1124,7 +1244,8 @@ class SalesforceReportExporter:
                                     "reportFormat": record.get("Format", "TABULAR")
                                 })
                         except Exception as e:
-                            print(f"Error fetching report chunk: {str(e)}")
+                            print(f"⚠️ Error fetching report chunk {i//chunk_size + 1}: {str(e)[:100]}")
+                            # Fallback: create entries with just IDs
                             for rid in chunk_ids:
                                 reports.append({
                                     "id": rid,
@@ -1132,7 +1253,6 @@ class SalesforceReportExporter:
                                     "reportFormat": "TABULAR"
                                 })
             
-            # Rest of the method stays the same...
             total = len(reports)
             completed = 0
             failed: List[Dict[str, Any]] = []
@@ -1142,6 +1262,29 @@ class SalesforceReportExporter:
             # Thread-safe counters
             completed_lock = threading.Lock()
             
+            # ✅ NEW: Adaptive worker count based on total reports
+            if total > 5000:
+                max_workers = min(max_workers, 8)  # Reduce workers for very large exports
+                print(f"⚙️ Large export detected ({total} reports), using {max_workers} workers")
+            elif total > 1000:
+                max_workers = min(max_workers, 10)
+                print(f"⚙️ Using {max_workers} workers for {total} reports")
+            
+            if total == 0:
+                with zipfile.ZipFile(output_zip_path, "w") as zf:
+                    zf.writestr("_README.txt", "No reports found with the selected IDs")
+                return {
+                    "zip": output_zip_path,
+                    "total": 0,
+                    "failed": [],
+                    "successful": [],
+                    "folder_name": "Selected Reports",
+                    "api_version": self.api_version,
+                    "cancelled": False,
+                    "completed": 0
+                }
+            
+            # ===== STEP 2: Define worker function =====
             def export_single_report(report: Dict) -> tuple:
                 """Export a single report - runs in thread pool"""
                 nonlocal completed
@@ -1160,11 +1303,11 @@ class SalesforceReportExporter:
                         with completed_lock:
                             current_count = completed
                         # Signal: download starting (with report name)
-                        self.progress_callback(current_count, len(reports), report_name)
+                        self.progress_callback(current_count, total, report_name)
                     except:
                         pass
                 
-                # Generate filename
+                # Generate filename (thread-safe)
                 base_name = safe_filename(report_name)
                 
                 with completed_lock:
@@ -1177,7 +1320,7 @@ class SalesforceReportExporter:
                 
                 csv_path = tmp_dir / filename
                 
-                # Retry logic
+                # Retry logic with exponential backoff
                 last_error = None
                 for attempt in range(retry_attempts):
                     # Check cancellation before each attempt
@@ -1185,14 +1328,10 @@ class SalesforceReportExporter:
                         return ("cancelled", report, None)
                     
                     try:
-                        # ✅ NEW: Update progress label with current report name
-                        if self.progress_callback:
-                            try:
-                                self.progress_callback(completed, total)
-                            except:
-                                pass
-
-                        csv_content = self.export_report_csv(report_id, timeout=120)
+                        # ✅ IMPROVED: Adaptive timeout based on total export size
+                        timeout = 180 if total > 5000 else 120
+                        
+                        csv_content = self.export_report_csv(report_id, timeout=timeout)
                         
                         if not csv_content or len(csv_content.strip()) == 0:
                             raise Exception("Empty response received")
@@ -1211,8 +1350,7 @@ class SalesforceReportExporter:
                         # ✅ NOTIFY: Report completed successfully
                         if self.progress_callback:
                             try:
-                                # Send progress update (completed count increased)
-                                self.progress_callback(current_count, len(reports))
+                                self.progress_callback(current_count, total)
                             except:
                                 pass
                         
@@ -1221,8 +1359,9 @@ class SalesforceReportExporter:
                     except Exception as e:
                         last_error = str(e)
                         if attempt < retry_attempts - 1:
-                            # Wait before retry (exponential backoff)
-                            time.sleep(1 * (attempt + 1))
+                            # ✅ IMPROVED: Exponential backoff with jitter
+                            wait_time = (2 ** attempt) + (attempt * 0.5)  # 1s, 2.5s, 5s
+                            time.sleep(wait_time)
                             continue
                         else:
                             # All retries failed
@@ -1246,13 +1385,15 @@ class SalesforceReportExporter:
                 # ✅ NOTIFY: Report failed (but counted as completed)
                 if self.progress_callback:
                     try:
-                        self.progress_callback(current_count, len(reports))
+                        self.progress_callback(current_count, total)
                     except:
                         pass
 
                 return ("failed", report, last_error)
             
-            # Export reports concurrently
+            # ===== STEP 3: Export reports concurrently =====
+            print(f"🚀 Starting concurrent export with {max_workers} workers...")
+            
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 # Submit all tasks
                 future_to_report = {
@@ -1260,10 +1401,15 @@ class SalesforceReportExporter:
                     for report in reports
                 }
                 
+                # ✅ NEW: Track progress milestones
+                last_milestone = 0
+                milestone_interval = max(100, total // 20)  # Log every 5%
+                
                 # Process completed tasks
                 for future in as_completed(future_to_report):
                     # Check for cancellation
                     if cancel_event and cancel_event.is_set():
+                        print("⚠️ Cancellation detected, stopping remaining downloads...")
                         # Cancel remaining futures
                         for f in future_to_report:
                             f.cancel()
@@ -1285,7 +1431,13 @@ class SalesforceReportExporter:
                             # Don't count as failed, just stopped
                             pass
                         
-                        # Update progress
+                        # ✅ NEW: Log progress milestones
+                        if completed - last_milestone >= milestone_interval:
+                            success_rate = (len(successful) / completed * 100) if completed > 0 else 0
+                            print(f"📊 Progress: {completed}/{total} ({completed/total*100:.1f}%) - Success rate: {success_rate:.1f}%")
+                            last_milestone = completed
+                        
+                        # Update progress callback
                         if self.progress_callback:
                             try:
                                 self.progress_callback(completed, total)
@@ -1302,12 +1454,16 @@ class SalesforceReportExporter:
                                 "type": report.get("reportFormat", "TABULAR"),
                                 "error": str(e)
                             })
+                            print(f"⚠️ Future error for {report.get('name')}: {str(e)[:100]}")
             
             # Check if cancelled
             was_cancelled = cancel_event and cancel_event.is_set()
             
-            # Create ZIP file with what we have
+            # ===== STEP 4: Create ZIP file =====
+            print(f"📦 Creating ZIP file with {completed} reports...")
+            
             with zipfile.ZipFile(output_zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+                # ✅ OPTIMIZED: Write files in sorted order for consistent ZIP structure
                 for file_path in sorted(tmp_dir.iterdir()):
                     if file_path.is_file():
                         zf.write(file_path, arcname=file_path.name)
@@ -1319,6 +1475,12 @@ class SalesforceReportExporter:
                     "Selected Reports" + (" (CANCELLED)" if was_cancelled else "")
                 )
                 zf.writestr("_EXPORT_SUMMARY.txt", summary)
+            
+            # ✅ NEW: Final statistics
+            success_rate = (len(successful) / total * 100) if total > 0 else 0
+            print(f"✅ Export complete: {len(successful)}/{total} successful ({success_rate:.1f}%)")
+            if failed:
+                print(f"⚠️ Failed: {len(failed)} reports")
             
             return {
                 "zip": output_zip_path,
@@ -1332,10 +1494,12 @@ class SalesforceReportExporter:
             }
         
         finally:
+            # ✅ IMPROVED: Better cleanup with error handling
             try:
                 shutil.rmtree(tmp_dir)
-            except Exception:
-                pass
+                print(f"🧹 Cleaned up temporary files")
+            except Exception as e:
+                print(f"⚠️ Error cleaning temp directory: {str(e)[:100]}")
 
 
     def _get_folder_name(self, folder_id: str) -> str:

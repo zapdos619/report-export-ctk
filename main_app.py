@@ -1104,14 +1104,14 @@ class SalesforceExporterApp(ctk.CTkToplevel):
         """
         Background worker to search Salesforce by keyword.
         
+        ✅ OPTIMIZED: Progress updates + memory-efficient result handling for 10,000+ reports.
+        
         Uses the new search_by_keyword() method from exporter which:
         1. Searches folders matching keyword
         2. Searches reports matching keyword
         3. Fetches parent folders of matching reports
         4. Groups reports by folder
         5. Returns organized data ready for tree view
-        
-        ✅ FIXED: Better error handling and cancellation checks
         
         Args:
             keyword: Search term entered by user
@@ -1141,6 +1141,7 @@ class SalesforceExporterApp(ctk.CTkToplevel):
             
             # Log search start
             self.update_queue.put(("log", f"🔍 Searching for: '{keyword}'"))
+            self.update_queue.put(("log", "⏳ This may take a moment for large orgs..."))
             
             # ✅ Check cancellation before search
             if self.export_cancel_event.is_set():
@@ -1194,8 +1195,12 @@ class SalesforceExporterApp(ctk.CTkToplevel):
             total_folders = len(folders)
             total_reports = sum(len(reports) for reports in reports_by_folder.values())
             
-            # Log results
-            self.update_queue.put(("log", f"✅ Found {total_folders} folders with {total_reports} reports"))
+            # ✅ NEW: Log memory-friendly statistics
+            self.update_queue.put(("log", f"✅ Search complete: {total_folders} folders, {total_reports} reports"))
+            
+            # ✅ NEW: Warn if result set is very large
+            if total_reports > 5000:
+                self.update_queue.put(("log", f"⚠️ Large result set ({total_reports} reports) - tree view may take a moment to render"))
             
             # ✅ Final cancellation check before sending results
             if self.export_cancel_event.is_set():
@@ -1225,7 +1230,7 @@ class SalesforceExporterApp(ctk.CTkToplevel):
         """
         Handle search completion and populate tree with results.
         
-        ✅ FIXED: Proper state cleanup and better error handling
+        ✅ FIXED: Thread-safe cache access + removed unnecessary after_idle().
         """
         try:
             # ✅ CRITICAL: Reset loading state FIRST
@@ -1249,20 +1254,28 @@ class SalesforceExporterApp(ctk.CTkToplevel):
             if not isinstance(reports_by_folder, dict):
                 reports_by_folder = {}
             
-            # ✅ Cache the results
+            # ✅ FIXED: Thread-safe cache operations
             if keyword:
                 keyword_lower = keyword.lower()
-                self.search_cache[keyword_lower] = {
-                    "folders": folders,
-                    "reports_by_folder": reports_by_folder,
-                    "keyword": keyword
-                }
                 
-                # ✅ Limit cache size (LRU-style)
-                if len(self.search_cache) > self.search_cache_max_size:
-                    # Remove oldest entry
-                    oldest_key = next(iter(self.search_cache))
-                    del self.search_cache[oldest_key]
+                # Only cache if result set is reasonable size
+                total_reports = sum(len(reports) for reports in reports_by_folder.values())
+                
+                if total_reports <= 5000:
+                    with self.data_lock:  # ✅ FIXED: Thread-safe cache write
+                        self.search_cache[keyword_lower] = {
+                            "folders": folders,
+                            "reports_by_folder": reports_by_folder,
+                            "keyword": keyword
+                        }
+                        
+                        # Limit cache size (LRU-style)
+                        if len(self.search_cache) > self.search_cache_max_size:
+                            oldest_key = next(iter(self.search_cache))
+                            del self.search_cache[oldest_key]
+                            self._log(f"🗑️ Removed oldest search from cache")
+                else:
+                    self._log(f"⚠️ Result set too large ({total_reports} reports) - skipping cache")
             
             # Update data storage
             with self.data_lock:
@@ -1284,18 +1297,18 @@ class SalesforceExporterApp(ctk.CTkToplevel):
             if total_folders == 0 and total_reports == 0:
                 # No results found
                 self._show_no_results_state(keyword)
-                
-                # Re-enable search
                 self._reset_search_ui()
-                
                 self._log(f"ℹ️ No results found for '{keyword}'")
                 return
             
-            # Populate tree with results
-            self._log(f"📊 Displaying {total_folders} folders with {total_reports} reports")
+            # ✅ NEW: Show progress for large result sets
+            if total_reports > 1000:
+                self._log(f"📊 Rendering {total_folders} folders with {total_reports} reports...")
+                self._log(f"⏳ Please wait, this may take a moment...")
             
-            # Use existing populate_tree method
+            # Populate tree with results
             try:
+                # ✅ FIXED: Direct call (we're already on main thread)
                 self._populate_tree("")
             except Exception as e:
                 self._log(f"❌ Error populating tree: {str(e)}")
@@ -1312,15 +1325,21 @@ class SalesforceExporterApp(ctk.CTkToplevel):
             self._log(f"📁 Folders: {total_folders}")
             self._log(f"📄 Reports: {total_reports}")
             
-            # Show folder breakdown (limited to first 10)
-            if total_folders > 0 and total_folders <= 10:
-                for folder in folders[:10]:
+            # ✅ NEW: Show folder breakdown only for reasonable sizes
+            if total_folders > 0 and total_folders <= 20:
+                for folder in folders[:20]:
                     folder_id = folder.get("id")
                     folder_name = folder.get("name")
                     report_count = len(reports_by_folder.get(folder_id, []))
                     self._log(f"  • {folder_name}: {report_count} reports")
+            elif total_folders > 20:
+                self._log(f"  • Top folders shown in tree view")
             
             self._log("=" * 50)
+            
+            # ✅ NEW: Performance tip for large result sets
+            if total_reports > 3000:
+                self._log(f"💡 Tip: Use virtual scrolling - only visible items are rendered")
             
             # Update export button state
             self._update_export_button_state()
@@ -1335,7 +1354,6 @@ class SalesforceExporterApp(ctk.CTkToplevel):
             
             self._log(f"❌ Error handling search results: {str(e)}")
             self._on_search_error(str(e))
-
 
     def _on_search_error(self, error_msg: str):
         """
@@ -1574,7 +1592,7 @@ class SalesforceExporterApp(ctk.CTkToplevel):
     def _on_search_button_clicked(self):
         """
         Handle search button click with caching.
-        ✅ FIXED: Better error handling and state checks
+        ✅ FIXED: Thread-safe cache read
         """
         # Get search keyword
         keyword = self.left_search_entry.get().strip()
@@ -1608,12 +1626,21 @@ class SalesforceExporterApp(ctk.CTkToplevel):
             messagebox.showerror("Not Logged In", "Please login first.")
             return
         
-        # ✅ NEW: Check cache first
+        # ✅ FIXED: Thread-safe cache check
         keyword_lower = keyword.lower()
-        if keyword_lower in self.search_cache:
+        cached_result = None
+        
+        with self.data_lock:  # ✅ Thread-safe read
+            if keyword_lower in self.search_cache:
+                # ✅ Copy to avoid mutation outside lock
+                cached_result = {
+                    "folders": self.search_cache[keyword_lower]["folders"].copy(),
+                    "reports_by_folder": self.search_cache[keyword_lower]["reports_by_folder"].copy(),
+                    "keyword": keyword
+                }
+        
+        if cached_result:
             self._log(f"⚡ Using cached results for: '{keyword}'")
-            cached_result = self.search_cache[keyword_lower]
-            cached_result["keyword"] = keyword  # Update display keyword
             self._on_search_complete(cached_result)
             return
         
@@ -1787,12 +1814,11 @@ class SalesforceExporterApp(ctk.CTkToplevel):
     
     # ===== TREE VIEW POPULATION =====
     
-
     def _populate_tree(self, search_term: str = ""):
         """
         Populate the tree view with folders and reports.
         
-        ✅ FIXED: Now uses virtual scrolling - NO UI FREEZING even with 10,000+ items!
+        ✅ OPTIMIZED: Lazy loading + virtual scrolling for 10,000+ reports (no UI freeze!).
         """
         
         # Clear existing tree
@@ -1813,6 +1839,20 @@ class SalesforceExporterApp(ctk.CTkToplevel):
             )
             placeholder.grid(row=0, column=0, pady=30)
             return
+        
+        # ✅ NEW: Show loading message for large datasets
+        total_folders = len(self.available_folders)
+        total_reports = sum(len(self.reports_by_folder.get(f.get("id"), [])) for f in self.available_folders)
+        
+        if total_reports > 1000:
+            loading_label = ctk.CTkLabel(
+                self.tree_container,
+                text=f"⏳ Loading {total_folders} folders with {total_reports} reports...",
+                text_color="gray",
+                font=ctk.CTkFont(size=12)
+            )
+            loading_label.grid(row=0, column=0, pady=30)
+            self.update_idletasks()  # Force UI update
         
         # Filter folders and reports by search term
         filtered_folders_data = []
@@ -1846,12 +1886,18 @@ class SalesforceExporterApp(ctk.CTkToplevel):
                                 "reports": matching_reports
                             })
             else:
+                # ✅ OPTIMIZED: Build filtered data in single pass
                 for folder in self.available_folders:
                     folder_id = folder.get("id")
                     filtered_folders_data.append({
                         "folder": folder,
                         "reports": self.reports_by_folder.get(folder_id, [])
                     })
+        
+        # Remove loading message if shown
+        if total_reports > 1000:
+            for widget in self.tree_container.winfo_children():
+                widget.destroy()
         
         if not filtered_folders_data and search_term:
             placeholder = ctk.CTkLabel(
@@ -1863,7 +1909,7 @@ class SalesforceExporterApp(ctk.CTkToplevel):
             placeholder.grid(row=0, column=0, pady=30)
             return
         
-        # ✅ CRITICAL FIX: Create virtual tree with CORRECT parameter name
+        # ✅ CRITICAL: Create virtual tree with proper configuration
         if not self.virtual_tree:
             self.virtual_tree = VirtualTreeView(
                 parent_frame=self.tree_container,
@@ -1878,6 +1924,11 @@ class SalesforceExporterApp(ctk.CTkToplevel):
 
         # ✅ NEW: Pass current selection state to virtual tree
         selected_report_ids = set(self.selected_items.keys())
+        
+        # ✅ OPTIMIZED: Set items with progress logging
+        if total_reports > 2000:
+            self._log(f"📊 Virtual tree rendering {len(filtered_folders_data)} folders...")
+        
         self.virtual_tree.set_items(filtered_folders_data, selected_report_ids)
         
         # Store tree_items for compatibility with existing code
@@ -1890,7 +1941,11 @@ class SalesforceExporterApp(ctk.CTkToplevel):
                 "row_index": idx,
                 "report_checkboxes": {}
             }
-    
+        
+        # ✅ NEW: Log completion for large datasets
+        if total_reports > 2000:
+            self._log(f"✅ Tree rendering complete - scroll to explore reports")
+        
     def _on_folder_checkbox_changed_virtual(self, folder_id: str, checkbox_var: ctk.BooleanVar):
         """
         Handle folder checkbox change from virtual tree.
