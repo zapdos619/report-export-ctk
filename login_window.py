@@ -458,7 +458,17 @@ class LoginWindow(ctk.CTkToplevel):  # ← CHANGED: Was CTk, now CTkToplevel
         
         KEY FIX: No more race conditions or delays before callback.
         Immediately triggers parent callback which handles window destruction.
+        
+        ✅ NEW: Also passes credentials for session refresh.
         """
+        # ✅ NEW: Store credentials along with session info
+        session_info["credentials"] = {
+            "username": self.username_entry.get().strip(),
+            "password": self.password_entry.get(),
+            "security_token": self.token_entry.get(),
+            "domain": self._get_current_domain()
+        }
+        
         self.session_info = session_info
         
         # Show success message
@@ -471,11 +481,16 @@ class LoginWindow(ctk.CTkToplevel):  # ← CHANGED: Was CTk, now CTkToplevel
         
         self._show_status(msg, "green")
         
-        # ← KEY FIX: Call parent callback immediately (no delay!)
-        # The parent (AppLauncher) is responsible for destroying this window
+        # Call parent callback immediately
         if self.on_login_success:
-            # Small delay just for user to see success message
             self.after(500, lambda: self._trigger_success_callback())
+
+    def _get_current_domain(self) -> str:
+        """Get the current domain setting (helper method)."""
+        if self.custom_domain_var.get():
+            return self.custom_domain_entry.get().strip()
+        else:
+            return "login" if self.env_var.get() == "Production" else "test"
     
     def _trigger_success_callback(self):
         """

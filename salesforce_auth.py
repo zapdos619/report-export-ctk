@@ -136,6 +136,65 @@ class SalesforceAuth:
         
         return result
     
+    def verify_session(self, session_id: str, instance_url: str) -> bool:
+        """
+        Verify if a session is still valid.
+        
+        Args:
+            session_id: The session ID to verify
+            instance_url: The Salesforce instance URL
+            
+        Returns:
+            True if session is valid, False otherwise
+        """
+        try:
+            # Try a simple API call to verify session
+            url = f"{instance_url}/services/data/v58.0/limits"
+            headers = {
+                "Authorization": f"Bearer {session_id}",
+                "Accept": "application/json"
+            }
+            
+            response = requests.get(url, headers=headers, timeout=15)
+            
+            # 200 = valid, 401 = expired/invalid
+            return response.status_code == 200
+            
+        except Exception as e:
+            print(f"⚠️ Session verification failed: {e}")
+            return False
+
+    def refresh_session_soap(
+        self,
+        username: str,
+        password: str,
+        security_token: str = "",
+        domain: str = "login"
+    ) -> dict:
+        """
+        Refresh session by re-authenticating (SOAP doesn't have refresh tokens).
+        
+        This is essentially a re-login, but we call it "refresh" to be clear
+        that we're maintaining the same user session conceptually.
+        
+        Args:
+            username: Salesforce username
+            password: Salesforce password
+            security_token: Security token
+            domain: Login domain
+            
+        Returns:
+            New session info dict
+            
+        Raises:
+            SalesforceAuthError: If refresh fails
+        """
+        try:
+            # SOAP login doesn't have refresh tokens, so we re-authenticate
+            return self.login(username, password, security_token, domain)
+        except Exception as e:
+            raise SalesforceAuthError(f"Session refresh failed: {str(e)}")
+    
     def _build_login_soap(self, username: str, password: str) -> str:
         """Build the SOAP XML for login request"""
         username = self._xml_escape(username)

@@ -8,6 +8,8 @@ import shutil
 from pathlib import Path
 import requests
 from typing import Callable, Optional, List, Dict, Any
+# exporter.py - Add to imports at the top
+from checkpoint import ExportCheckpoint
 
 
 def get_org_api_version(instance_url: str, session_id: str = None) -> str:
@@ -1047,6 +1049,9 @@ class SalesforceReportExporter:
             except Exception:
                 pass
     
+
+    # exporter.py - REPLACE the existing export_selected_reports_to_zip_concurrent method
+
     def export_selected_reports_to_zip_concurrent(
         self,
         output_zip_path: str,
@@ -1054,12 +1059,14 @@ class SalesforceReportExporter:
         max_workers: int = 5,
         cancel_event: Optional[Any] = None,
         retry_attempts: int = 3,
-        reports_metadata: Optional[Dict[str, Dict]] = None  # ✅ NEW: Accept metadata
+        reports_metadata: Optional[Dict[str, Dict]] = None,
+        checkpoint_path: Optional[str] = None,  # ✅ NEW: Checkpoint file path
+        resume_mode: bool = False  # ✅ NEW: Are we resuming?
     ) -> Dict[str, Any]:
         """
         Export specific selected reports to a ZIP file using CONCURRENT downloads.
         
-        ✅ OPTIMIZED: Accepts pre-fetched metadata to avoid redundant API calls.
+        ✅ NEW: Supports checkpoint/resume for crash recovery.
         
         Args:
             output_zip_path: Path where ZIP file will be saved
@@ -1068,6 +1075,8 @@ class SalesforceReportExporter:
             cancel_event: Threading event to signal cancellation
             retry_attempts: Number of retry attempts for failed reports
             reports_metadata: Optional dict of {report_id: {name, format}} to skip metadata fetch
+            checkpoint_path: Optional path to checkpoint file (enables resume)
+            resume_mode: True if resuming from checkpoint
             
         Returns:
             Dictionary with export results
@@ -1077,23 +1086,50 @@ class SalesforceReportExporter:
         
         tmp_dir = Path(tempfile.mkdtemp(prefix="sf_reports_"))
         
+        # ✅ NEW: Initialize checkpoint if path provided
+        checkpoint = None
+        if checkpoint_path:
+            checkpoint = ExportCheckpoint(checkpoint_path)
+            
+            if resume_mode:
+                # Load existing checkpoint
+                if checkpoint.load():
+                    # Get pending reports from checkpoint
+                    pending_ids = checkpoint.get_pending_reports()
+                    completed_ids = checkpoint.get_completed_reports()
+                    
+                    self._log_to_callback(f"📂 Resuming export: {len(completed_ids)} already completed, {len(pending_ids)} remaining")
+                    
+                    # Override report_ids with pending ones
+                    report_ids = pending_ids
+                else:
+                    self._log_to_callback("⚠️ Could not load checkpoint, starting fresh export")
+                    resume_mode = False
+            
+            if not resume_mode:
+                # Initialize new checkpoint
+                session_info = {
+                    "session_id": self.session_id,
+                    "instance_url": self.instance_url,
+                    "api_version": self.api_version
+                }
+                checkpoint.initialize(output_zip_path, report_ids, session_info)
+        
         try:
             # ✅ OPTIMIZED: Use provided metadata if available, else fetch
             if reports_metadata:
-                # Use cached metadata (saves API calls!)
                 reports = []
                 for report_id in report_ids:
                     if report_id in reports_metadata:
                         reports.append(reports_metadata[report_id])
                     else:
-                        # Fallback: create basic entry
                         reports.append({
                             "id": report_id,
                             "name": report_id,
                             "reportFormat": "TABULAR"
                         })
             else:
-                # Fallback: Fetch metadata if not provided (OLD BEHAVIOR)
+                # Fallback: Fetch metadata
                 if not report_ids:
                     reports = []
                 else:
@@ -1101,7 +1137,6 @@ class SalesforceReportExporter:
                     reports = []
                     
                     for i in range(0, len(report_ids), chunk_size):
-                        # Check for cancellation
                         if cancel_event and cancel_event.is_set():
                             raise Exception("Export cancelled by user")
                         
@@ -1132,9 +1167,16 @@ class SalesforceReportExporter:
                                     "reportFormat": "TABULAR"
                                 })
             
-            # Rest of the method stays the same...
-            total = len(reports)
-            completed = 0
+            # ✅ ADJUSTED: Total includes already completed (for progress tracking)
+            total = len(report_ids)
+            if resume_mode and checkpoint:
+                # Add already completed count to show full progress
+                completed_before_resume = len(checkpoint.get_completed_reports())
+                total = checkpoint.get_progress()["total"]
+            else:
+                completed_before_resume = 0
+            
+            completed = completed_before_resume  # Start from where we left off
             failed: List[Dict[str, Any]] = []
             successful: List[str] = []
             used_filenames: Dict[str, int] = {}
@@ -1146,7 +1188,7 @@ class SalesforceReportExporter:
                 """Export a single report - runs in thread pool"""
                 nonlocal completed
                 
-                # Check for cancellation
+                # ✅ CRITICAL: Check cancellation FIRST (before any work)
                 if cancel_event and cancel_event.is_set():
                     return ("cancelled", report, None)
                 
@@ -1154,13 +1196,16 @@ class SalesforceReportExporter:
                 report_name = report.get("name") or report_id
                 report_type = report.get("reportFormat", "TABULAR")
                 
-                # ✅ NOTIFY: Starting download of this report
+                # ✅ Check again before notifying
+                if cancel_event and cancel_event.is_set():
+                    return ("cancelled", report, None)
+                
+                # ✅ NOTIFY: Starting download
                 if self.progress_callback:
                     try:
                         with completed_lock:
                             current_count = completed
-                        # Signal: download starting (with report name)
-                        self.progress_callback(current_count, len(reports), report_name)
+                        self.progress_callback(current_count, total, report_name)
                     except:
                         pass
                 
@@ -1180,19 +1225,17 @@ class SalesforceReportExporter:
                 # Retry logic
                 last_error = None
                 for attempt in range(retry_attempts):
-                    # Check cancellation before each attempt
+                    # ✅ CRITICAL: Check cancel before EACH attempt
                     if cancel_event and cancel_event.is_set():
                         return ("cancelled", report, None)
                     
                     try:
-                        # ✅ NEW: Update progress label with current report name
-                        if self.progress_callback:
-                            try:
-                                self.progress_callback(completed, total)
-                            except:
-                                pass
-
-                        csv_content = self.export_report_csv(report_id, timeout=120)
+                        # ✅ NEW: Shorter timeout to detect cancel faster
+                        csv_content = self.export_report_csv(report_id, timeout=60)  # Reduced from 120
+                        
+                        # ✅ Check cancel after download
+                        if cancel_event and cancel_event.is_set():
+                            return ("cancelled", report, None)
                         
                         if not csv_content or len(csv_content.strip()) == 0:
                             raise Exception("Empty response received")
@@ -1203,16 +1246,18 @@ class SalesforceReportExporter:
                         
                         csv_path.write_text(csv_content, encoding="utf-8")
                         
-                        # Success! Increment counter FIRST
+                        # ✅ NEW: Update checkpoint
+                        if checkpoint:
+                            checkpoint.mark_completed(report_id)
+                        
+                        # Success!
                         with completed_lock:
                             completed += 1
                             current_count = completed
                         
-                        # ✅ NOTIFY: Report completed successfully
                         if self.progress_callback:
                             try:
-                                # Send progress update (completed count increased)
-                                self.progress_callback(current_count, len(reports))
+                                self.progress_callback(current_count, total)
                             except:
                                 pass
                         
@@ -1220,12 +1265,15 @@ class SalesforceReportExporter:
                         
                     except Exception as e:
                         last_error = str(e)
+                        
+                        # ✅ Check cancel before retry
+                        if cancel_event and cancel_event.is_set():
+                            return ("cancelled", report, None)
+                        
                         if attempt < retry_attempts - 1:
-                            # Wait before retry (exponential backoff)
                             time.sleep(1 * (attempt + 1))
                             continue
                         else:
-                            # All retries failed
                             break
                 
                 # Failed after all retries
@@ -1237,40 +1285,45 @@ class SalesforceReportExporter:
                     f"# Error: {last_error}\n"
                 )
                 csv_path.write_text(error_content, encoding="utf-8")
-
-                # Increment counter FIRST
+                
+                # ✅ NEW: Update checkpoint
+                if checkpoint:
+                    checkpoint.mark_failed(report_id, report_name, last_error)
+                
                 with completed_lock:
                     completed += 1
                     current_count = completed
-
-                # ✅ NOTIFY: Report failed (but counted as completed)
+                
                 if self.progress_callback:
                     try:
-                        self.progress_callback(current_count, len(reports))
+                        self.progress_callback(current_count, total)
                     except:
                         pass
-
+                
                 return ("failed", report, last_error)
             
             # Export reports concurrently
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                # Submit all tasks
                 future_to_report = {
                     executor.submit(export_single_report, report): report 
                     for report in reports
                 }
                 
-                # Process completed tasks
                 for future in as_completed(future_to_report):
-                    # Check for cancellation
+                    # ✅ IMPROVED: Check for cancellation MORE FREQUENTLY
                     if cancel_event and cancel_event.is_set():
-                        # Cancel remaining futures
+                        print("🛑 Cancel detected - stopping all futures")
+                        
+                        # Cancel ALL remaining futures immediately
                         for f in future_to_report:
-                            f.cancel()
+                            if not f.done():
+                                f.cancel()
+                        
+                        # Break out of loop
                         break
                     
                     try:
-                        status, report, data = future.result()
+                        status, report, data = future.result(timeout=1)  # ✅ Add timeout
                         
                         if status == "success":
                             successful.append(report.get("name"))
@@ -1282,10 +1335,8 @@ class SalesforceReportExporter:
                                 "error": data
                             })
                         elif status == "cancelled":
-                            # Don't count as failed, just stopped
                             pass
                         
-                        # Update progress
                         if self.progress_callback:
                             try:
                                 self.progress_callback(completed, total)
@@ -1293,7 +1344,6 @@ class SalesforceReportExporter:
                                 pass
                                 
                     except Exception as e:
-                        # Future itself failed
                         report = future_to_report.get(future)
                         if report:
                             failed.append({
@@ -1306,7 +1356,16 @@ class SalesforceReportExporter:
             # Check if cancelled
             was_cancelled = cancel_event and cancel_event.is_set()
             
-            # Create ZIP file with what we have
+            # ✅ NEW: Get failed reports from checkpoint if resuming
+            if resume_mode and checkpoint:
+                checkpoint_failed = checkpoint.get_failed_reports()
+                # Merge with current failed
+                existing_ids = {f["id"] for f in failed}
+                for cf in checkpoint_failed:
+                    if cf["id"] not in existing_ids:
+                        failed.append(cf)
+            
+            # Create ZIP file
             with zipfile.ZipFile(output_zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
                 for file_path in sorted(tmp_dir.iterdir()):
                     if file_path.is_file():
@@ -1316,9 +1375,13 @@ class SalesforceReportExporter:
                     total, 
                     successful, 
                     failed, 
-                    "Selected Reports" + (" (CANCELLED)" if was_cancelled else "")
+                    "Selected Reports" + (" (RESUMED)" if resume_mode else "") + (" (CANCELLED)" if was_cancelled else "")
                 )
                 zf.writestr("_EXPORT_SUMMARY.txt", summary)
+            
+            # ✅ NEW: Delete checkpoint if complete
+            if checkpoint and checkpoint.is_complete() and not was_cancelled:
+                checkpoint.delete()
             
             return {
                 "zip": output_zip_path,
@@ -1328,7 +1391,8 @@ class SalesforceReportExporter:
                 "folder_name": "Selected Reports",
                 "api_version": self.api_version,
                 "cancelled": was_cancelled,
-                "completed": completed
+                "completed": completed - completed_before_resume,  # Only newly completed
+                "resumed": resume_mode
             }
         
         finally:
@@ -1337,6 +1401,10 @@ class SalesforceReportExporter:
             except Exception:
                 pass
 
+    def _log_to_callback(self, message: str):
+        """Helper to log via progress callback (if it supports it)"""
+        # This is just for internal logging, doesn't affect progress
+        print(f"[EXPORTER] {message}")
 
     def _get_folder_name(self, folder_id: str) -> str:
         """Get the name of a folder by its ID"""

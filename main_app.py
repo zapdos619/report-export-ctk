@@ -1,6 +1,8 @@
 # main_app.py - REDESIGNED VERSION
 # Salesforce Report Exporter with Tree View and Dual-Panel Selection
 
+# main_app.py - Complete imports section (lines 1-20)
+
 import customtkinter as ctk
 import threading
 import queue
@@ -9,13 +11,14 @@ import subprocess
 import platform
 import datetime
 import time
-from login_window import LoginWindow
+from pathlib import Path  # ✅ ADD THIS
 from tkinter import filedialog, messagebox, ttk
 from typing import Optional, List, Dict, Any, Callable
 from login_window import LoginWindow
 from exporter import SalesforceReportExporter
-from virtual_tree import VirtualTreeView 
-
+from virtual_tree import VirtualTreeView
+from checkpoint import ExportCheckpoint  # ✅ ADD THIS
+from session_manager import SessionManager  # ✅ ADD THIS
 
 class ExportProgressTracker:
     """
@@ -134,6 +137,8 @@ class SalesforceExporterApp(ctk.CTkToplevel):
     Redesigned with folder/report tree view and dual-panel selection.
     """
     
+    # main_app.py - Complete __init__ method (replaces existing one around line 40-180)
+
     def __init__(self, master, session_info: Dict, on_logout: Optional[Callable] = None):
         """Initialize with improved state management"""
         super().__init__(master)
@@ -187,6 +192,11 @@ class SalesforceExporterApp(ctk.CTkToplevel):
         self.virtual_tree: Optional[VirtualTreeView] = None
         self.tree_items: Dict[str, Dict] = {}  # Keep for compatibility
         
+        # ✅ NEW: Checkpoint support
+        self.checkpoint_path = None
+        self.pending_checkpoint = None  # Stores detected checkpoint info
+        self.resume_mode = False
+        
         # Progress tracker
         self.progress_tracker = ExportProgressTracker()
         
@@ -197,6 +207,28 @@ class SalesforceExporterApp(ctk.CTkToplevel):
         self._configure_timer = None
         self._last_window_geometry = None
         self._last_export_state = None
+        
+        # ✅ NEW: Initialize session manager with credentials
+        self.session_manager = SessionManager()
+        
+        # Extract credentials from session_info (added by login_window)
+        credentials = session_info.get("credentials", {})
+        if credentials:
+            self.session_manager.initialize(
+                session_info=session_info,
+                username=credentials.get("username", ""),
+                password=credentials.get("password", ""),
+                security_token=credentials.get("security_token", ""),
+                domain=credentials.get("domain", "login")
+            )
+            
+            # Setup callbacks
+            self.session_manager.on_session_refreshed = self._on_session_refreshed
+            self.session_manager.on_session_expired = self._on_session_expired
+            
+            print("✅ Session manager initialized")
+        else:
+            print("⚠️ No credentials provided - session refresh disabled")
         
         # Setup UI
         self._setup_ui()
@@ -222,7 +254,92 @@ class SalesforceExporterApp(ctk.CTkToplevel):
         # Auto-load data after UI is ready
         self.after(500, self._show_welcome_message)
         
-    
+        # ✅ NEW: Start emergency reset monitor
+        self.after(5000, self._emergency_reset_if_stuck)
+        
+
+    # main_app.py - Add these NEW methods after __init__ (around line 200)
+
+    def _on_session_refreshed(self, new_session_info: Dict):
+        """
+        Callback when session is refreshed.
+        Update our session_info with new session ID.
+        
+        Args:
+            new_session_info: New session info from refresh
+        """
+        with self.data_lock:
+            # Update session ID and related info
+            self.session_info["session_id"] = new_session_info.get("session_id")
+            self.session_info["server_url"] = new_session_info.get("server_url")
+            
+            self._log("🔄 Session refreshed successfully")
+            self._log(f"   New session ID: ...{new_session_info.get('session_id', '')[-8:]}")
+
+    def _on_session_expired(self):
+        """
+        Callback when session expires and cannot be refreshed.
+        Show error and optionally logout.
+        """
+        self._log("❌ Session expired and could not be refreshed")
+        
+        # If export is running, it will fail - let the error handler deal with it
+        # If not exporting, show a warning
+        if not self._is_export_busy():
+            def show_expired_dialog():
+                result = messagebox.showerror(
+                    "Session Expired",
+                    "Your Salesforce session has expired and could not be refreshed.\n\n"
+                    "Please log out and log back in.",
+                    icon='error'
+                )
+            
+            # Show dialog on main thread
+            self._safe_ui_update(show_expired_dialog)
+
+    def _emergency_reset_if_stuck(self):
+        """
+        Emergency reset if UI appears stuck.
+        Called periodically to check for stuck states.
+        """
+        try:
+            # Check if we're in "cancelling" state for too long
+            current_state = self._get_export_state()
+            
+            if current_state == "cancelling":
+                # Check how long we've been cancelling
+                if not hasattr(self, '_cancelling_start_time'):
+                    self._cancelling_start_time = time.time()
+                else:
+                    elapsed = time.time() - self._cancelling_start_time
+                    
+                    if elapsed > 15:  # Stuck for 15+ seconds
+                        print("🚨 EMERGENCY: Export stuck in cancelling state, forcing reset")
+                        self._log("🚨 Emergency reset: Export was stuck")
+                        
+                        # Force reset
+                        self._reset_export_state()
+                        self._set_export_ui_state(True)
+                        self._refresh_button_visibility()
+                        
+                        self.progress_label.configure(
+                            text="⚠️ Export cancelled (forced reset)",
+                            text_color="orange"
+                        )
+                        
+                        # Clear timestamp
+                        delattr(self, '_cancelling_start_time')
+            else:
+                # Not cancelling, clear timestamp
+                if hasattr(self, '_cancelling_start_time'):
+                    delattr(self, '_cancelling_start_time')
+        
+        except Exception as e:
+            print(f"⚠️ Emergency reset check error: {e}")
+        
+        # Schedule next check in 5 seconds
+        self.after(5000, self._emergency_reset_if_stuck)    
+
     def _cancel_export_safe(self):
         """
         Safe wrapper for ESC key binding.
@@ -302,16 +419,48 @@ class SalesforceExporterApp(ctk.CTkToplevel):
         state = self._get_export_state()
         return state in ("running", "cancelling")
 
+    # main_app.py - REPLACE _reset_export_state (around line 120)
 
     def _reset_export_state(self):
-        """Reset export state to idle and clear all flags"""
+        """
+        Reset export state to idle and clear all flags.
+        
+        FIXED: Always resets, even if already idle.
+        """
         with self.state_lock:
             self._export_state = "idle"
             self.is_exporting = False
             self._showing_dialog = False
             self.export_cancel_event.clear()
-            
-            print("🔄 Export state reset to IDLE")        
+        
+        print("🔄 Export state reset to IDLE")
+        
+        # ✅ Force button refresh on main thread (ALWAYS)
+        def force_button_reset():
+            try:
+                # Hide cancel button
+                self.cancel_button.grid_remove()
+                self.cancel_button.configure(
+                    state="disabled",
+                    text="🛑 Cancel Export"
+                )
+                
+                # Show export button
+                self.export_button.grid(row=2, column=0, sticky="ew", padx=10, pady=(0, 5))
+                self.export_button.lift()
+                
+                # Update export button state
+                self._update_export_button_state()
+                
+                # Force UI update
+                self.update_idletasks()
+                
+                print("✅ Buttons reset successfully")
+            except Exception as e:
+                print(f"⚠️ Button reset error: {e}")
+        
+        # Execute on main thread
+        self.after(50, force_button_reset)
         
     def _set_ui_state(self, state: str):
         """
@@ -948,7 +1097,7 @@ class SalesforceExporterApp(ctk.CTkToplevel):
         
         # Check if busy
         if self._is_ui_busy():
-            # ✅ Better message based on what's happening
+            # Better message based on what's happening
             if self.is_loading:
                 message = "Search is in progress. Cancel search and logout?"
             elif self.is_exporting:
@@ -965,11 +1114,11 @@ class SalesforceExporterApp(ctk.CTkToplevel):
             if not result:
                 return
             
-            # ✅ Set cancel event to stop loading/exporting
+            # Set cancel event to stop loading/exporting
             self._log("🛑 Cancelling operations for logout...")
             self.export_cancel_event.set()
             
-            # ✅ Give threads 500ms to see the cancel event, then force logout
+            # Give threads 500ms to see the cancel event, then force logout
             self.after(500, self._force_logout_after_cancel)
             return
         
@@ -984,6 +1133,9 @@ class SalesforceExporterApp(ctk.CTkToplevel):
             return
         
         self._log("🔴 Logging out...")
+        
+        # ✅ NEW: Clear session manager
+        self.session_manager.clear()
         
         # Release grab before calling parent callback
         try:
@@ -1068,6 +1220,180 @@ class SalesforceExporterApp(ctk.CTkToplevel):
         
         # Show empty search state in tree
         self._show_empty_search_state()
+        
+        # ✅ NEW: Check for existing checkpoint
+        self.after(2000, self._check_for_existing_checkpoint)
+
+    # main_app.py - Add this NEW method after _show_welcome_message()
+
+    def _check_for_existing_checkpoint(self):
+        """
+        Check if there's an existing checkpoint from a previous export.
+        If found, offer to resume.
+        """
+        try:
+            # Look for checkpoint files in user's temp directory
+            import tempfile
+            temp_dir = Path(tempfile.gettempdir())
+            checkpoint_files = list(temp_dir.glob("sf_export_checkpoint_*.json"))
+            
+            if not checkpoint_files:
+                return
+            
+            # Get most recent checkpoint
+            checkpoint_files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+            latest_checkpoint = checkpoint_files[0]
+            
+            # Try to load it
+            checkpoint = ExportCheckpoint(str(latest_checkpoint))
+            if not checkpoint.load():
+                return
+            
+            # Check if it's incomplete
+            progress = checkpoint.get_progress()
+            if progress["pending"] == 0:
+                # Complete, delete it
+                checkpoint.delete()
+                return
+            
+            # We have an incomplete checkpoint!
+            self.pending_checkpoint = {
+                "path": str(latest_checkpoint),
+                "checkpoint": checkpoint,
+                "progress": progress,
+                "output_path": checkpoint.get_output_path()
+            }
+            
+            # Show resume prompt
+            self.after(1000, self._show_resume_prompt)
+            
+        except Exception as e:
+            print(f"⚠️ Error checking for checkpoint: {e}")
+
+    def _show_resume_prompt(self):
+        """Show dialog asking user if they want to resume previous export."""
+        if not self.pending_checkpoint:
+            return
+        
+        progress = self.pending_checkpoint["progress"]
+        output_path = self.pending_checkpoint["output_path"]
+        
+        message = (
+            f"Found an incomplete export:\n\n"
+            f"📊 Progress:\n"
+            f"  • Total: {progress['total']} reports\n"
+            f"  • Completed: {progress['completed']}\n"
+            f"  • Failed: {progress['failed']}\n"
+            f"  • Pending: {progress['pending']}\n\n"
+            f"📦 Destination: {output_path}\n\n"
+            f"Would you like to resume this export?"
+        )
+        
+        result = messagebox.askyesno(
+            "Resume Previous Export?",
+            message,
+            icon='question'
+        )
+        
+        if result:
+            # User wants to resume
+            self._resume_from_checkpoint()
+        else:
+            # User declined, delete checkpoint
+            self.pending_checkpoint["checkpoint"].delete()
+            self.pending_checkpoint = None
+            self._log("🗑️ Previous checkpoint deleted")
+
+    def _resume_from_checkpoint(self):
+        """Resume export from existing checkpoint."""
+        if not self.pending_checkpoint:
+            return
+        
+        try:
+            checkpoint = self.pending_checkpoint["checkpoint"]
+            checkpoint_path = self.pending_checkpoint["path"]
+            progress = self.pending_checkpoint["progress"]
+            
+            # Get session info from checkpoint
+            stored_session = checkpoint.get_session_info()
+            
+            # Verify session is still valid (same instance)
+            current_instance = self.session_info.get("instance_url", "")
+            stored_instance = stored_session.get("instance_url", "")
+            
+            if current_instance != stored_instance:
+                messagebox.showerror(
+                    "Cannot Resume",
+                    f"Checkpoint is for a different Salesforce instance:\n\n"
+                    f"Current: {current_instance}\n"
+                    f"Checkpoint: {stored_instance}\n\n"
+                    f"Please login to the correct instance or start a new export."
+                )
+                self.pending_checkpoint = None
+                return
+            
+            # Set resume mode
+            self.resume_mode = True
+            self.checkpoint_path = checkpoint_path
+            
+            # Set output path
+            self.output_zip_path = checkpoint.get_output_path()
+            
+            # Update UI
+            output_dir = str(Path(self.output_zip_path).parent)
+            self.location_entry.configure(state="normal")
+            self.location_entry.delete(0, "end")
+            self.location_entry.insert(0, output_dir)
+            self.location_entry.configure(state="readonly")
+            
+            filename = Path(self.output_zip_path).name
+            self.filename_entry.delete(0, "end")
+            self.filename_entry.insert(0, filename)
+            
+            # Log
+            self._log("=" * 50)
+            self._log("📂 RESUMING PREVIOUS EXPORT")
+            self._log(f"✅ Already completed: {progress['completed']} reports")
+            self._log(f"⏳ Remaining: {progress['pending']} reports")
+            self._log(f"❌ Previously failed: {progress['failed']} reports")
+            self._log("=" * 50)
+            
+            # Automatically start export
+            self.after(500, self._start_export_from_resume)
+            
+        except Exception as e:
+            self._log(f"❌ Failed to resume: {str(e)}")
+            messagebox.showerror("Resume Failed", f"Could not resume export:\n\n{str(e)}")
+            self.pending_checkpoint = None
+
+    def _start_export_from_resume(self):
+        """Start export in resume mode (called automatically after resume prompt)."""
+        # Get pending report IDs from checkpoint
+        checkpoint = self.pending_checkpoint["checkpoint"]
+        pending_ids = checkpoint.get_pending_reports()
+        
+        # Build reports_metadata for pending reports
+        reports_metadata = {}
+        
+        # Try to get metadata from already loaded data
+        with self.data_lock:
+            for folder_id, reports in self.reports_by_folder.items():
+                for report in reports:
+                    report_id = report.get("id")
+                    if report_id in pending_ids:
+                        reports_metadata[report_id] = {
+                            "id": report_id,
+                            "name": report.get("name", report_id),
+                            "reportFormat": report.get("reportFormat", "TABULAR")
+                        }
+        
+        # Start export (this will use resume mode)
+        self._start_export_internal(
+            report_ids=pending_ids,
+            reports_metadata=reports_metadata,
+            resume_mode=True
+        )
+    
         
     def _search_worker(self, keyword: str):
         """
@@ -1811,38 +2137,7 @@ class SalesforceExporterApp(ctk.CTkToplevel):
         # Fallback if virtual tree doesn't exist (should never happen)
         self._log("⚠️ Warning: Virtual tree not initialized")
     
-    def _on_report_checkbox_changed(self, report_id: str, report_name: str, folder_id: str, checkbox_var: ctk.BooleanVar):
-        """
-        Handle individual report checkbox change - LEGACY METHOD.
-        ✅ UPDATED: Redirects to virtual tree handler if using virtual tree.
-        """
-        # If using virtual tree, redirect to new handler
-        if self.virtual_tree:
-            return self._on_report_checkbox_changed_virtual(report_id, report_name, folder_id, checkbox_var)
-        
-        # Old implementation (kept for compatibility)
-        is_checked = checkbox_var.get()
-        folder_name = self.tree_items.get(folder_id, {}).get("folder_name", "Unknown")
-        
-        if is_checked:
-            self.selected_items[report_id] = {
-                "type": "report",
-                "name": report_name,
-                "folder_id": folder_id,
-                "folder_name": folder_name
-            }
-            self._log(f"✅ Selected: {report_name}")
-        else:
-            if report_id in self.selected_items:
-                del self.selected_items[report_id]
-            self._log(f"❌ Deselected: {report_name}")
-            
-            if folder_id in self.tree_items:
-                self.tree_items[folder_id]["checkbox_var"].set(False)
-        
-        self._refresh_selected_panel()
-    
-    
+
     # ===== SELECTED PANEL MANAGEMENT =====
     
     def _refresh_selected_panel(self):
@@ -2099,52 +2394,60 @@ class SalesforceExporterApp(ctk.CTkToplevel):
         
     # ===== EXPORT OPERATIONS =====
     
+    # main_app.py - REPLACE _cancel_export (around line 1050)
+
     def _cancel_export(self):
         """
         Cancel the ongoing export operation.
         
-        IMPROVED: Proper state transition with atomic operations.
+        FIXED: Detects if export already completed.
         """
-        # ✅ IMPROVED: Check actual state
+        # Check actual state
         export_state = self._get_export_state()
+        
+        print(f"🛑 Cancel clicked - current state: {export_state}")
+        
+        # ✅ NEW: If already idle, export already finished - just reset UI
+        if export_state == "idle":
+            print("⚠️ Export already completed or idle")
+            self._reset_export_state()
+            self._set_export_ui_state(True)
+            self._refresh_button_visibility()
+            return
         
         if export_state != "running":
             print(f"⚠️ Cannot cancel - export state is '{export_state}'")
             return
         
-        # ✅ IMPROVED: Check if already cancelling
+        # Check if already cancelling
         if self.export_cancel_event.is_set():
             print("⚠️ Export already cancelling")
             return
         
-        # Show confirmation dialog
-        result = messagebox.askyesno(
-            "Cancel Export",
-            "Cancel the export?\n\n"
-            "You can choose to save the reports that have already been exported.",
-            icon='warning'
-        )
-        
-        if not result:
-            print("ℹ️ Cancel operation aborted by user")
-            return
-        
-        # ✅ CRITICAL: Transition to "cancelling" state atomically
-        self._set_export_state("cancelling")
-        
-        # Set cancel event (background thread will see this)
+        # ✅ Set cancel event
         self.export_cancel_event.set()
+        
+        # ✅ Transition to "cancelling" state
+        self._set_export_state("cancelling")
         
         self._log("🛑 Cancelling export...")
         
-        # ✅ Update button to show "Cancelling..." state
-        self._refresh_button_visibility()
+        # Update UI
+        self.progress_label.configure(
+            text="Cancelling export... Please wait.",
+            text_color="orange"
+        )
         
-        self.progress_label.configure(text="Cancelling export...", text_color="orange")
+        # Update button
+        self.cancel_button.configure(
+            state="disabled",
+            text="🛑 Cancelling..."
+        )
         
-        print("✅ Cancel event set - background thread will stop gracefully")
-    
-    
+        print("✅ Cancel event set")
+        
+    # main_app.py - REPLACE _start_export method (around line 1100)
+
     def _start_export(self):
         """
         Start the export process.
@@ -2161,7 +2464,6 @@ class SalesforceExporterApp(ctk.CTkToplevel):
                 print("⚠️ Export already busy")
                 return
             
-            # Mark that we're showing dialog
             self._showing_dialog = True
         
         # Validation checks
@@ -2213,6 +2515,70 @@ class SalesforceExporterApp(ctk.CTkToplevel):
             print("ℹ️ Export cancelled by user (dialog)")
             return
         
+        # Get list of report IDs
+        report_ids = list(self.selected_items.keys())
+        
+        # ✅ NEW: Generate checkpoint path
+        import tempfile
+        timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+        self.checkpoint_path = os.path.join(
+            tempfile.gettempdir(),
+            f"sf_export_checkpoint_{timestamp}.json"
+        )
+        self.resume_mode = False
+        
+        # Build reports metadata
+        reports_metadata = {}
+        with self.data_lock:
+            for folder_id, reports in self.reports_by_folder.items():
+                for report in reports:
+                    report_id = report.get("id")
+                    if report_id in report_ids:
+                        reports_metadata[report_id] = {
+                            "id": report_id,
+                            "name": report.get("name", report_id),
+                            "reportFormat": report.get("reportFormat", "TABULAR")
+                        }
+        
+        # Start export
+        self._start_export_internal(report_ids, reports_metadata, resume_mode=False)
+
+    def _start_export_internal(
+        self,
+        report_ids: List[str],
+        reports_metadata: Dict[str, Dict],
+        resume_mode: bool = False
+    ):
+        """
+        Internal method to start export (used by both new exports and resume).
+        
+        ✅ NEW: Verifies session before starting.
+        
+        Args:
+            report_ids: List of report IDs to export
+            reports_metadata: Metadata for reports
+            resume_mode: True if resuming from checkpoint
+        """
+        # ✅ NEW: Verify session before export
+        self._log("🔍 Verifying session...")
+        
+        if not self.session_manager.verify_and_refresh_if_needed():
+            self._log("❌ Session verification failed")
+            messagebox.showerror(
+                "Session Error",
+                "Could not verify Salesforce session.\n\n"
+                "Please log out and log back in."
+            )
+            return
+        
+        # Get potentially refreshed session info
+        current_session = self.session_manager.get_session_info()
+        if current_session:
+            with self.data_lock:
+                self.session_info["session_id"] = current_session.get("session_id")
+        
+        self._log("✅ Session verified")
+        
         # ✅ CRITICAL: Transition to "running" state atomically
         self._set_export_state("running")
         
@@ -2222,14 +2588,22 @@ class SalesforceExporterApp(ctk.CTkToplevel):
         # Update UI
         self._set_export_ui_state(False)
         
-        self._log(f"🚀 Starting export of {count} selected reports...")
+        count = len(report_ids)
+        action = "Resuming" if resume_mode else "Starting"
+        self._log(f"🚀 {action} export of {count} selected reports...")
         self._log(f"📦 Destination: {self.output_zip_path}")
         
-        # Get list of report IDs
-        report_ids = list(self.selected_items.keys())
+        if resume_mode:
+            self._log(f"📂 Using checkpoint: {self.checkpoint_path}")
         
         # Initialize progress tracker
-        self.progress_tracker.start(len(report_ids))
+        if resume_mode and self.pending_checkpoint:
+            # Start from where we left off
+            completed_before = self.pending_checkpoint["progress"]["completed"]
+            self.progress_tracker.start(self.pending_checkpoint["progress"]["total"])
+            self.progress_tracker.completed = completed_before
+        else:
+            self.progress_tracker.start(len(report_ids))
         
         # ✅ Update buttons to show cancel button
         self._refresh_button_visibility()
@@ -2239,13 +2613,122 @@ class SalesforceExporterApp(ctk.CTkToplevel):
         
         # ✅ Start export in BACKGROUND THREAD (UI stays responsive)
         thread = threading.Thread(
-            target=self._export_worker,
-            args=(report_ids,),
+            target=self._export_worker_with_checkpoint,
+            args=(report_ids, reports_metadata, resume_mode),
             daemon=True
         )
         thread.start()
         
         print("✅ Export thread started")
+ 
+    # main_app.py - Add this NEW method after _start_export_internal
+
+    def _export_worker_with_checkpoint(
+        self,
+        report_ids: List[str],
+        reports_metadata: Dict[str, Dict],
+        resume_mode: bool = False
+    ):
+        """
+        Background worker for export with checkpoint support.
+        
+        ✅ NEW: Passes checkpoint_path to exporter for crash recovery.
+        ✅ NEW: Monitors session during export.
+        
+        Args:
+            report_ids: List of report IDs to export
+            reports_metadata: Metadata for reports
+            resume_mode: True if resuming from checkpoint
+        """
+        try:
+            # ✅ NEW: Check session before starting
+            if not self.session_manager.verify_and_refresh_if_needed():
+                raise Exception("Session verification failed before export")
+            
+            session_id = self.session_info.get("session_id")
+            instance_url = self.session_info.get("instance_url")
+            
+            # ✅ NEW: Track last session check time
+            last_session_check = time.time()
+            SESSION_CHECK_INTERVAL = 300  # Check every 5 minutes
+            
+            def progress_callback(done, total, report_name=None):
+                """Progress callback - called when report starts/completes"""
+                nonlocal last_session_check
+                
+                # ✅ NEW: Periodically verify session during long exports
+                current_time = time.time()
+                if current_time - last_session_check > SESSION_CHECK_INTERVAL:
+                    self.update_queue.put(("log", "🔍 Verifying session..."))
+                    
+                    if not self.session_manager.verify_and_refresh_if_needed():
+                        self.update_queue.put(("log", "⚠️ Session verification failed during export"))
+                        # Export will likely fail soon, but let it try
+                    else:
+                        self.update_queue.put(("log", "✅ Session still valid"))
+                        
+                        # Update session_id in case it was refreshed
+                        new_session = self.session_manager.get_session_info()
+                        if new_session:
+                            session_id = new_session.get("session_id")
+                    
+                    last_session_check = current_time
+                
+                if report_name:
+                    self.update_queue.put(("progress_with_name", (done, total, report_name)))
+                    self.update_queue.put(("log", f"  📥 Downloading: {report_name}"))
+                    return
+                
+                self.update_queue.put(("progress", (done, total)))
+                
+                if done > 0 and done <= total:
+                    percentage = int((done / total) * 100)
+                    speed = self.progress_tracker.get_speed()
+                    
+                    if speed > 0.5:
+                        self.update_queue.put(("log", f"  ✅ Completed: {done}/{total} ({percentage}%) • {speed:.1f} reports/sec"))
+                    else:
+                        self.update_queue.put(("log", f"  ✅ Completed: {done}/{total} ({percentage}%)"))
+            
+            # ✅ NEW: Use current session_id (might be refreshed)
+            exporter = SalesforceReportExporter(
+                session_id,
+                instance_url,
+                progress_callback=progress_callback
+            )
+            
+            # Log export start
+            action = "Resuming" if resume_mode else "Starting"
+            self.update_queue.put(("log", f"🚀 {action} concurrent export of {len(report_ids)} reports..."))
+            
+            if resume_mode:
+                self.update_queue.put(("log", f"📂 Checkpoint: {self.checkpoint_path}"))
+            
+            # Check cancellation before export
+            if self.export_cancel_event.is_set():
+                self.update_queue.put(("export_cancelled", None))
+                return
+            
+            # ✅ MAIN EXPORT: With checkpoint support
+            result = exporter.export_selected_reports_to_zip_concurrent(
+                self.output_zip_path,
+                report_ids,
+                max_workers=10,
+                cancel_event=self.export_cancel_event,
+                retry_attempts=3,
+                reports_metadata=reports_metadata,
+                checkpoint_path=self.checkpoint_path,  # ✅ Checkpoint enabled
+                resume_mode=resume_mode  # ✅ Resume mode
+            )
+            
+            self.update_queue.put(("export_complete", result))
+            
+        except Exception as e:
+            import traceback
+            error_details = traceback.format_exc()
+            self.update_queue.put(("log", f"❌ Export error:\n{error_details}"))
+            self.update_queue.put(("export_error", str(e)))
+
 
     def _start_export_safe(self):
         """
@@ -2387,178 +2870,180 @@ class SalesforceExporterApp(ctk.CTkToplevel):
                 text_color="#1f6aa5"
             )
     
+    # main_app.py - REPLACE _on_export_complete method (around line 1350)
+
+    # main_app.py - REPLACE ENTIRE _on_export_complete method (around line 1400)
+
     def _on_export_complete(self, result: Dict):
         """
-        Handle export completion (including cancellation).
+        Handle export completion (including cancellation and resume).
         
-        IMPROVED: Proper state cleanup with atomic transitions.
+        FIXED: Simplified guards to prevent blocking legitimate completions.
         """
         print("📥 Export completion handler called")
+        print(f"   Result: {result.get('total')} total, {result.get('cancelled')} cancelled")
         
-        # ✅ GUARD: Prevent multiple completion handlers
+        # ✅ SIMPLIFIED: Only prevent double-processing, don't check state
         with self.state_lock:
-            current_state = self._get_export_state()
-            
             if self._showing_dialog:
-                # Already showing completion dialog, ignore duplicate calls
-                print("⚠️ Completion dialog already showing, ignoring duplicate call")
+                print("⚠️ Dialog already showing, ignoring duplicate")
                 return
             
-            if current_state == "idle":
-                # Already handled completion, ignore
-                print("⚠️ Export already completed, ignoring duplicate call")
-                return
-            
-            # Mark that we're showing dialog
+            # Set flag to prevent double-processing
             self._showing_dialog = True
         
-        # Extract result data
-        total = result.get("total", 0)
-        failed = result.get("failed", [])
-        successful = result.get("successful", [])
-        zip_path = result.get("zip", "")
-        was_cancelled = result.get("cancelled", False)
-        completed = result.get("completed", len(successful))
-        
-        # Update progress with statistics
-        elapsed = self.progress_tracker.get_elapsed_seconds()
-        elapsed_formatted = self.progress_tracker.format_time(elapsed)
-        
-        # Update progress bar and label
-        if was_cancelled:
-            progress_value = completed / total if total > 0 else 0
-            self.progress_bar.set(progress_value)
+        try:
+            # Extract result data
+            total = result.get("total", 0)
+            failed = result.get("failed", [])
+            successful = result.get("successful", [])
+            zip_path = result.get("zip", "")
+            was_cancelled = result.get("cancelled", False)
+            completed = result.get("completed", len(successful))
+            was_resumed = result.get("resumed", False)
             
-            self.progress_label.configure(
-                text=f"⚠️ Export cancelled after {elapsed_formatted}. Saved {completed}/{total} reports",
-                text_color="orange"
-            )
-        else:
-            self.progress_bar.set(1.0)
+            # ✅ CRITICAL: Also check if cancel event is set
+            if not was_cancelled:
+                was_cancelled = self.export_cancel_event.is_set()
             
-            # Get completion statistics
-            completion_text = self.progress_tracker.get_completion_text()
-            self.progress_label.configure(
-                text=completion_text,
-                text_color="green"
-            )
-        
-        # Log summary with statistics
-        self._log("=" * 50)
-        
-        if was_cancelled:
-            self._log(f"⚠️ EXPORT CANCELLED BY USER")
-            self._log(f"📊 Completed: {completed}/{total} reports")
-        else:
-            self._log(f"✅ EXPORT COMPLETED SUCCESSFULLY")
+            # ✅ Calculate statistics
+            elapsed = self.progress_tracker.get_elapsed_seconds()
+            elapsed_formatted = self.progress_tracker.format_time(elapsed)
+            avg_speed = completed / elapsed if elapsed > 0 else 0
+            
+            # ✅ CRITICAL: Reset state FIRST (before showing dialog)
+            self._reset_export_state()
+            self._set_export_ui_state(True)
+            
+            # Update progress bar
+            if was_cancelled:
+                progress_value = completed / total if total > 0 else 0
+                self.progress_bar.set(progress_value)
+                self.progress_label.configure(
+                    text=f"⚠️ Export cancelled. Saved {completed}/{total} reports",
+                    text_color="orange"
+                )
+            else:
+                self.progress_bar.set(1.0)
+                completion_text = self.progress_tracker.get_completion_text()
+                self.progress_label.configure(
+                    text=completion_text,
+                    text_color="green"
+                )
+            
+            # Force UI update BEFORE dialog
+            self.update_idletasks()
+            
+            # Log summary
+            self._log("=" * 50)
+            if was_cancelled:
+                self._log(f"⚠️ EXPORT CANCELLED BY USER")
+            elif was_resumed:
+                self._log(f"✅ RESUMED EXPORT COMPLETED")
+            else:
+                self._log(f"✅ EXPORT COMPLETED SUCCESSFULLY")
+            
             self._log(f"📊 Total: {total} reports")
+            self._log(f"⏱️ Duration: {elapsed_formatted}")
+            if avg_speed > 0:
+                self._log(f"⚡ Speed: {avg_speed:.2f} reports/sec")
+            self._log(f"✔️ Successful: {len(successful)}")
+            self._log(f"❌ Failed: {len(failed)}")
+            self._log(f"💾 ZIP: {zip_path}")
+            self._log("=" * 50)
+            
+            # Clear pending checkpoint
+            if was_resumed and self.pending_checkpoint:
+                self.pending_checkpoint = None
+            
+            # ✅ Show appropriate dialog
+            if was_cancelled:
+                self._handle_cancelled_export(
+                    completed, total, successful, failed, 
+                    elapsed_formatted, avg_speed, zip_path, was_resumed
+                )
+            else:
+                self._handle_successful_export(
+                    total, successful, failed, 
+                    elapsed_formatted, avg_speed, zip_path, was_resumed
+                )
         
-        # Export statistics
-        avg_speed = completed / elapsed if elapsed > 0 else 0
-        
-        self._log(f"⏱️  Duration: {elapsed_formatted}")
-        if avg_speed > 0:
-            self._log(f"⚡ Average Speed: {avg_speed:.2f} reports/sec")
-        
-        self._log(f"✔️  Successful: {len(successful)}")
-        self._log(f"❌ Failed: {len(failed)}")
-        
-        if len(failed) > 0:
-            success_rate = (len(successful) / total * 100) if total > 0 else 0
-            self._log(f"📈 Success Rate: {success_rate:.1f}%")
-        
-        self._log(f"💾 Saved to: {zip_path}")
-        self._log("=" * 50)
-        
-        if failed:
-            self._log("⚠️ Failed reports:")
-            for f in failed[:5]:
-                error_msg = f.get('error', 'Unknown error')
-                self._log(f"  • {f.get('name')}: {error_msg[:50]}")
-            if len(failed) > 5:
-                self._log(f"  ... and {len(failed) - 5} more (see summary file)")
-        
-        # ✅ CRITICAL: Reset export state BEFORE showing dialogs
-        # This ensures buttons work correctly even if user cancels dialog
-        self._reset_export_state()
-        
-        # ✅ Update UI state
-        self._set_export_ui_state(True)
-        
-        # ✅ Refresh button visibility
-        self._refresh_button_visibility()
-        
-        # Force UI update
-        self.update_idletasks()
-        
-        print("✅ Export state reset to IDLE, showing user dialog...")
-        
-        # ✅ Handle cancellation vs completion separately
-        if was_cancelled:
-            self._handle_cancelled_export(completed, total, successful, failed, elapsed_formatted, avg_speed, zip_path)
-        else:
-            self._handle_successful_export(total, successful, failed, elapsed_formatted, avg_speed, zip_path)
-        
-        # ✅ CRITICAL: Clear dialog flag after user interaction
-        with self.state_lock:
-            self._showing_dialog = False
-        
-        print("✅ Completion handler finished")
+        finally:
+            # ✅ CRITICAL: Always clear dialog flag in finally block
+            with self.state_lock:
+                self._showing_dialog = False
+            
+            print("✅ Completion handler finished")
     
-    def _handle_cancelled_export(self, completed, total, successful, failed, elapsed_formatted, avg_speed, zip_path):
+    # main_app.py - REPLACE _handle_cancelled_export (around line 1500)
+
+    def _handle_cancelled_export(self, completed, total, successful, failed, elapsed_formatted, avg_speed, zip_path, was_resumed):
         """
         Handle UI flow when export was cancelled.
         
-        IMPROVED: Better dialog management and state handling.
+        FIXED: Simpler dialog flow, always shows.
         """
-        # Build cancellation message
-        message = f"Export was cancelled.\n\n"
+        # Build message
+        message = f"⚠️ Export was cancelled"
+        if was_resumed:
+            message += " (resumed export)"
+        message += ".\n\n"
+        
         message += f"📊 Statistics:\n"
         message += f"  • Completed: {completed}/{total} reports\n"
         message += f"  • Successful: {len(successful)}\n"
         message += f"  • Failed: {len(failed)}\n"
         message += f"  • Duration: {elapsed_formatted}\n"
         if avg_speed > 0:
-            message += f"  • Average Speed: {avg_speed:.1f} reports/sec\n"
-        message += f"\nPartial export saved to:\n{zip_path}\n\n"
-        message += f"Do you want to keep this partial export?"
+            message += f"  • Speed: {avg_speed:.1f} reports/sec\n"
+        message += f"\n💾 Partial export saved to:\n{zip_path}\n\n"
         
-        # Ask user about partial export
-        keep_result = messagebox.askyesnocancel(
+        if self.checkpoint_path:
+            message += f"💡 Progress saved! You can resume later.\n\n"
+        
+        message += f"Keep this partial export?"
+        
+        # Ask user
+        keep_result = messagebox.askyesno(
             "Export Cancelled",
             message,
             icon='warning'
         )
         
-        if keep_result is False:  # User chose "No" - delete
+        if keep_result is False:  # Delete
             try:
-                import os
                 os.remove(zip_path)
                 self._log(f"🗑️ Partial export deleted")
-                messagebox.showinfo("Deleted", "Partial export has been deleted.")
+                
+                if self.checkpoint_path and os.path.exists(self.checkpoint_path):
+                    os.remove(self.checkpoint_path)
+                    self._log(f"🗑️ Checkpoint deleted")
+                
+                messagebox.showinfo("Deleted", "Partial export deleted.")
             except Exception as e:
-                self._log(f"❌ Failed to delete: {str(e)}")
-                messagebox.showerror("Error", f"Could not delete file:\n{str(e)}")
+                messagebox.showerror("Error", f"Could not delete:\n{str(e)}")
         
-        elif keep_result is True:  # User chose "Yes" - keep and ask about opening folder
+        elif keep_result is True:  # Keep
             self._ask_open_folder(zip_path)
         
-        # If None (Cancel button), do nothing - just keep the file
-        print("✅ Cancelled export handler finished")
-
-
-        # If None (Cancel button), do nothing - just keep the file
+        print("✅ Cancelled handler finished")
     
-    def _handle_successful_export(self, total, successful, failed, elapsed_formatted, avg_speed, zip_path):
+    # main_app.py - REPLACE _handle_successful_export (around line 1550)
+
+    def _handle_successful_export(self, total, successful, failed, elapsed_formatted, avg_speed, zip_path, was_resumed):
         """
         Handle UI flow when export completed successfully.
         
-        IMPROVED: Cleaner dialog flow.
+        FIXED: Simpler dialog flow, always shows.
         """
         success_rate = (len(successful) / total * 100) if total > 0 else 0
         
         # Build success message
-        message = f"Export completed successfully!\n\n"
+        message = "✅ Export completed successfully"
+        if was_resumed:
+            message += " (resumed from checkpoint)"
+        message += "!\n\n"
+        
         message += f"📊 Statistics:\n"
         message += f"  • Total Reports: {total}\n"
         message += f"  • Successful: {len(successful)}\n"
@@ -2566,17 +3051,24 @@ class SalesforceExporterApp(ctk.CTkToplevel):
         message += f"  • Success Rate: {success_rate:.1f}%\n"
         message += f"  • Duration: {elapsed_formatted}\n"
         if avg_speed > 0:
-            message += f"  • Average Speed: {avg_speed:.1f} reports/sec\n"
+            message += f"  • Speed: {avg_speed:.1f} reports/sec\n"
         message += f"\n💾 ZIP saved to:\n{zip_path}"
         
         # Show success dialog
         messagebox.showinfo("Export Complete", message)
         
+        # Delete checkpoint on success
+        if self.checkpoint_path and os.path.exists(self.checkpoint_path):
+            try:
+                os.remove(self.checkpoint_path)
+                self._log(f"🗑️ Checkpoint deleted")
+            except:
+                pass
+        
         # Ask about opening folder
         self._ask_open_folder(zip_path)
         
-        print("✅ Successful export handler finished")
-
+        print("✅ Success handler finished")
     
     def _ask_open_folder(self, zip_path):
         """
