@@ -34,8 +34,15 @@ class LoginWindow(ctk.CTkToplevel):  # ← CHANGED: Was CTk, now CTkToplevel
         self.title("Salesforce Login")
         
         # ← NEW: Make this window modal-like (grab focus)
-        self.grab_set()
+        # self.grab_set()
         
+        # ✅ SAFETY: Keep master window hidden
+        if master and master.winfo_exists():
+            try:
+                master.withdraw()
+            except:
+                pass     
+          
         # Hide initially to calculate size
         self.withdraw()
         self.update_idletasks()

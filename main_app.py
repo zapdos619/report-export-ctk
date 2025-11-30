@@ -142,29 +142,36 @@ class SalesforceExporterApp(ctk.CTkToplevel):
         self.session_info = session_info
         self.on_logout_callback = on_logout
         
-        # ✅ CRITICAL: Initialize ALL state flags FIRST (before any other code runs)
         # This prevents AttributeError when window configure events fire early
-        self.is_exporting = False  # ← MUST be initialized early
-        self.is_loading = False    # ← MUST be initialized early
-        self._export_state = "idle"  # ← NEW: Single state variable
-        self._showing_dialog = False  # ← Dialog flag
+        self.is_exporting = False  
+        self.is_loading = False    
+        self._export_state = "idle" 
+        self._showing_dialog = False 
         
         # ✅ NEW: Search results cache
-        self.search_cache: Dict[str, Dict] = {}  # {keyword: {folders, reports_by_folder}}
+        self.search_cache: Dict[str, Dict] = {}  
         self.search_cache_max_size = 10  # Keep last 10 searches
         
         # Thread Safety - Initialize locks early
         self.data_lock = threading.RLock()
         self.ui_lock = threading.RLock()
-        self.state_lock = threading.RLock()  # ← NEW: Dedicated state lock
+        self.state_lock = threading.RLock() 
         
         # Export control
         self.export_cancel_event = threading.Event()
         
+        # ✅ NEW: Prevent double-initialization
+        self._initialized = False
+        
         # Window setup (after basic state init)
         self.title("Salesforce Report Exporter")
         self.geometry("1200x800")
-        self.grab_set()
+        
+        if master and master.winfo_exists():
+            try:
+                master.withdraw()  # Hide the empty root window
+            except:
+                pass
         
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("blue")
@@ -198,8 +205,14 @@ class SalesforceExporterApp(ctk.CTkToplevel):
         self._last_window_geometry = None
         self._last_export_state = None
         
+        # ✅ NEW: Destruction flag (prevents operations during shutdown)
+        self._is_being_destroyed = False
+        
         # Setup UI
         self._setup_ui()
+        
+        # Optional: Enable debug mode
+        # self._enable_debug_mode()
         
         # Center window on screen
         self.after(100, self._center_window)
@@ -218,6 +231,9 @@ class SalesforceExporterApp(ctk.CTkToplevel):
         
         # Window configuration tracking (bind AFTER attributes are initialized)
         self.bind('<Configure>', self._on_window_configure)
+        
+        # ✅ Mark as initialized
+        self._initialized = True
         
         # Auto-load data after UI is ready
         self.after(500, self._show_welcome_message)
@@ -441,8 +457,16 @@ class SalesforceExporterApp(ctk.CTkToplevel):
         Handle window move/resize events with debouncing.
         Fixes button visibility issues when moving between monitors.
         
-        IMPROVED: Better debouncing with adaptive delays and safety checks.
+        ✅ IMPROVED: Better safety checks and early bailout
         """
+        # ✅ SAFETY: Ignore if being destroyed
+        if self._is_being_destroyed:
+            return
+        
+        # ✅ SAFETY: Ignore if not initialized
+        if not hasattr(self, '_initialized') or not self._initialized:
+            return
+        
         # Only process events for the main window (not child widgets)
         if event and event.widget != self:
             return
@@ -471,11 +495,18 @@ class SalesforceExporterApp(ctk.CTkToplevel):
         """
         Apply window configuration changes after debounce delay.
         
-        IMPROVED: Simplified with better error handling.
+        ✅ IMPROVED: More safety checks
         """
+        # ✅ SAFETY: Ignore if being destroyed
+        if self._is_being_destroyed:
+            return
+        
         try:
             # ✅ SAFETY: Check attributes exist
-            if not hasattr(self, 'is_exporting'):
+            if not hasattr(self, 'is_exporting') or not hasattr(self, '_initialized'):
+                return
+            
+            if not self._initialized:
                 return
             
             # Refresh buttons with current state
@@ -1080,38 +1111,84 @@ class SalesforceExporterApp(ctk.CTkToplevel):
         4. Groups reports by folder
         5. Returns organized data ready for tree view
         
+        ✅ FIXED: Better error handling and cancellation checks
+        
         Args:
             keyword: Search term entered by user
         """
         try:
+            # ✅ SAFETY: Check if we still have session
+            if not self.session_info:
+                self.update_queue.put(("log", "❌ No session - please login again"))
+                self.update_queue.put(("search_error", "Session expired"))
+                return
+            
             session_id = self.session_info.get("session_id")
             instance_url = self.session_info.get("instance_url")
             
+            if not session_id or not instance_url:
+                self.update_queue.put(("log", "❌ Invalid session data"))
+                self.update_queue.put(("search_error", "Invalid session"))
+                return
+            
             # Create exporter instance
-            exporter = SalesforceReportExporter(session_id, instance_url)
+            try:
+                exporter = SalesforceReportExporter(session_id, instance_url)
+            except Exception as e:
+                self.update_queue.put(("log", f"❌ Failed to create exporter: {str(e)}"))
+                self.update_queue.put(("search_error", f"Connection error: {str(e)}"))
+                return
             
             # Log search start
             self.update_queue.put(("log", f"🔍 Searching for: '{keyword}'"))
             
-            # Check cancellation before search
+            # ✅ Check cancellation before search
             if self.export_cancel_event.is_set():
                 self.update_queue.put(("search_cancelled", None))
                 return
             
             # ✅ MAIN SEARCH: This does all the heavy lifting
-            result = exporter.search_by_keyword(
-                keyword=keyword,
-                cancel_event=self.export_cancel_event
-            )
+            try:
+                result = exporter.search_by_keyword(
+                    keyword=keyword,
+                    cancel_event=self.export_cancel_event
+                )
+            except Exception as e:
+                # Catch search-specific errors
+                error_msg = str(e)
+                
+                # Check if it's a cancellation
+                if "cancel" in error_msg.lower():
+                    self.update_queue.put(("search_cancelled", None))
+                    return
+                
+                # Real error
+                self.update_queue.put(("log", f"❌ Search API error: {error_msg}"))
+                self.update_queue.put(("search_error", error_msg))
+                return
             
-            # Check cancellation after search
+            # ✅ Check cancellation after search
             if self.export_cancel_event.is_set():
                 self.update_queue.put(("search_cancelled", None))
                 return
             
-            # Extract results
+            # ✅ Validate result structure
+            if not isinstance(result, dict):
+                self.update_queue.put(("log", f"❌ Invalid search result type: {type(result)}"))
+                self.update_queue.put(("search_error", "Invalid response from Salesforce"))
+                return
+            
+            # Extract results with defaults
             folders = result.get("folders", [])
             reports_by_folder = result.get("reports_by_folder", {})
+            
+            # ✅ Validate folders
+            if not isinstance(folders, list):
+                folders = []
+            
+            # ✅ Validate reports_by_folder
+            if not isinstance(reports_by_folder, dict):
+                reports_by_folder = {}
             
             # Calculate statistics
             total_folders = len(folders)
@@ -1119,6 +1196,11 @@ class SalesforceExporterApp(ctk.CTkToplevel):
             
             # Log results
             self.update_queue.put(("log", f"✅ Found {total_folders} folders with {total_reports} reports"))
+            
+            # ✅ Final cancellation check before sending results
+            if self.export_cancel_event.is_set():
+                self.update_queue.put(("search_cancelled", None))
+                return
             
             # Send organized data to UI
             self.update_queue.put(("search_complete", {
@@ -1128,9 +1210,14 @@ class SalesforceExporterApp(ctk.CTkToplevel):
             }))
             
         except Exception as e:
+            # ✅ Catch ANY unhandled exception
             import traceback
             error_details = traceback.format_exc()
-            self.update_queue.put(("log", f"❌ Search error: {error_details}"))
+            
+            print(f"❌ SEARCH WORKER ERROR:")
+            print(error_details)
+            
+            self.update_queue.put(("log", f"❌ Search error: {str(e)}"))
             self.update_queue.put(("search_error", str(e)))
 
 
@@ -1138,164 +1225,201 @@ class SalesforceExporterApp(ctk.CTkToplevel):
         """
         Handle search completion and populate tree with results.
         
-        ✅ FIXED: Preserves selections across different searches (no auto-clearing).
+        ✅ FIXED: Proper state cleanup and better error handling
         """
-        # Extract data
-        folders = result.get("folders", [])
-        reports_by_folder = result.get("reports_by_folder", {})
-        keyword = result.get("keyword", "")
-        
-        # ✅ Cache the results
-        keyword_lower = keyword.lower()
-        self.search_cache[keyword_lower] = {
-            "folders": folders,
-            "reports_by_folder": reports_by_folder,
-            "keyword": keyword
-        }
-        
-        # ✅ Limit cache size (LRU-style)
-        if len(self.search_cache) > self.search_cache_max_size:
-            # Remove oldest entry
-            oldest_key = next(iter(self.search_cache))
-            del self.search_cache[oldest_key]
-        
-        # Update data storage
-        with self.data_lock:
-            self.available_folders = folders
-            self.reports_by_folder = reports_by_folder
-        
-        # Calculate statistics
-        total_folders = len(folders)
-        total_reports = sum(len(reports) for reports in reports_by_folder.values())
-        
-        # Clear search loading state
-        for widget in self.tree_container.winfo_children():
-            widget.destroy()
-        
-        # Check if we got results
-        if total_folders == 0 and total_reports == 0:
-            # No results found
-            self._show_no_results_state(keyword)
+        try:
+            # ✅ CRITICAL: Reset loading state FIRST
+            with self.state_lock:
+                self.is_loading = False
+                self._set_ui_state("idle")
+            
+            # Extract data with validation
+            if not isinstance(result, dict):
+                self._log(f"❌ Invalid result type: {type(result)}")
+                self._on_search_error("Invalid search result")
+                return
+            
+            folders = result.get("folders", [])
+            reports_by_folder = result.get("reports_by_folder", {})
+            keyword = result.get("keyword", "")
+            
+            # Validate types
+            if not isinstance(folders, list):
+                folders = []
+            if not isinstance(reports_by_folder, dict):
+                reports_by_folder = {}
+            
+            # ✅ Cache the results
+            if keyword:
+                keyword_lower = keyword.lower()
+                self.search_cache[keyword_lower] = {
+                    "folders": folders,
+                    "reports_by_folder": reports_by_folder,
+                    "keyword": keyword
+                }
+                
+                # ✅ Limit cache size (LRU-style)
+                if len(self.search_cache) > self.search_cache_max_size:
+                    # Remove oldest entry
+                    oldest_key = next(iter(self.search_cache))
+                    del self.search_cache[oldest_key]
+            
+            # Update data storage
+            with self.data_lock:
+                self.available_folders = folders
+                self.reports_by_folder = reports_by_folder
+            
+            # Calculate statistics
+            total_folders = len(folders)
+            total_reports = sum(len(reports) for reports in reports_by_folder.values())
+            
+            # Clear search loading state
+            try:
+                for widget in self.tree_container.winfo_children():
+                    widget.destroy()
+            except Exception as e:
+                print(f"⚠️ Error clearing tree: {e}")
+            
+            # Check if we got results
+            if total_folders == 0 and total_reports == 0:
+                # No results found
+                self._show_no_results_state(keyword)
+                
+                # Re-enable search
+                self._reset_search_ui()
+                
+                self._log(f"ℹ️ No results found for '{keyword}'")
+                return
+            
+            # Populate tree with results
+            self._log(f"📊 Displaying {total_folders} folders with {total_reports} reports")
+            
+            # Use existing populate_tree method
+            try:
+                self._populate_tree("")
+            except Exception as e:
+                self._log(f"❌ Error populating tree: {str(e)}")
+                import traceback
+                traceback.print_exc()
             
             # Re-enable search
-            self.search_button.configure(state="normal", text="🔍 Search")
-            self.left_search_entry.configure(state="normal")
+            self._reset_search_ui()
             
-            # Reset state
-            self._set_ui_state("idle")
+            # Log summary
+            self._log("=" * 50)
+            self._log(f"✅ SEARCH COMPLETE")
+            self._log(f"🔍 Keyword: '{keyword}'")
+            self._log(f"📁 Folders: {total_folders}")
+            self._log(f"📄 Reports: {total_reports}")
             
-            self._log(f"ℹ️ No results found for '{keyword}'")
-            return
-        
-        # Populate tree with results
-        self._log(f"📊 Displaying {total_folders} folders with {total_reports} reports")
-        
-        # ✅ REMOVED: Don't filter out selections anymore!
-        # Users might want to export reports from multiple searches
-        # They can manually clear if needed using "Clear All Selected" button
-        
-        # Use existing populate_tree method
-        self._populate_tree("")
-        
-        # Re-enable search
-        self.search_button.configure(state="normal", text="🔍 Search")
-        self.left_search_entry.configure(state="normal")
-        
-        # Reset state
-        self._set_ui_state("idle")
-        
-        # Log summary
-        self._log("=" * 50)
-        self._log(f"✅ SEARCH COMPLETE")
-        self._log(f"🔍 Keyword: '{keyword}'")
-        self._log(f"📁 Folders: {total_folders}")
-        self._log(f"📄 Reports: {total_reports}")
-        
-        # Show folder breakdown
-        if total_folders > 0 and total_folders <= 10:
-            for folder in folders[:10]:
-                folder_id = folder.get("id")
-                folder_name = folder.get("name")
-                report_count = len(reports_by_folder.get(folder_id, []))
-                self._log(f"  • {folder_name}: {report_count} reports")
-        
-        self._log("=" * 50)
-        
-        # Update export button state
-        self._update_export_button_state()
+            # Show folder breakdown (limited to first 10)
+            if total_folders > 0 and total_folders <= 10:
+                for folder in folders[:10]:
+                    folder_id = folder.get("id")
+                    folder_name = folder.get("name")
+                    report_count = len(reports_by_folder.get(folder_id, []))
+                    self._log(f"  • {folder_name}: {report_count} reports")
+            
+            self._log("=" * 50)
+            
+            # Update export button state
+            self._update_export_button_state()
+            
+        except Exception as e:
+            # ✅ Catch any error in completion handler
+            import traceback
+            error_details = traceback.format_exc()
+            
+            print(f"❌ SEARCH COMPLETE HANDLER ERROR:")
+            print(error_details)
+            
+            self._log(f"❌ Error handling search results: {str(e)}")
+            self._on_search_error(str(e))
 
 
     def _on_search_error(self, error_msg: str):
         """
         Handle search error with user-friendly messages.
         
+        ✅ FIXED: Always resets state and UI, even on errors
+        
         Args:
             error_msg: Error message from search worker
         """
+        # ✅ CRITICAL: Reset loading state FIRST
+        with self.state_lock:
+            self.is_loading = False
+            self._set_ui_state("idle")
+        
         # Clear search loading state
-        for widget in self.tree_container.winfo_children():
-            widget.destroy()
+        try:
+            for widget in self.tree_container.winfo_children():
+                widget.destroy()
+        except Exception as e:
+            print(f"⚠️ Error clearing tree: {e}")
         
         # Show error state in tree
-        error_frame = ctk.CTkFrame(self.tree_container, fg_color="transparent")
-        error_frame.grid(row=0, column=0, pady=30)
-        
-        icon_label = ctk.CTkLabel(
-            error_frame,
-            text="❌",
-            font=ctk.CTkFont(size=48)
-        )
-        icon_label.pack(pady=(0, 10))
-        
-        title_label = ctk.CTkLabel(
-            error_frame,
-            text="Search Failed",
-            font=ctk.CTkFont(size=16, weight="bold"),
-            text_color="red"
-        )
-        title_label.pack(pady=(0, 5))
-        
-        # Truncate long error messages
-        display_error = error_msg[:200] + "..." if len(error_msg) > 200 else error_msg
-        
-        error_label = ctk.CTkLabel(
-            error_frame,
-            text=display_error,
-            font=ctk.CTkFont(size=11),
-            text_color="gray",
-            wraplength=400,
-            justify="center"
-        )
-        error_label.pack(pady=(0, 15))
-        
-        # Helpful suggestion
-        suggestion = self._get_search_error_suggestion(error_msg)
-        if suggestion:
-            suggestion_label = ctk.CTkLabel(
+        try:
+            error_frame = ctk.CTkFrame(self.tree_container, fg_color="transparent")
+            error_frame.grid(row=0, column=0, pady=30)
+            
+            icon_label = ctk.CTkLabel(
                 error_frame,
-                text=f"💡 {suggestion}",
-                font=ctk.CTkFont(size=10),
-                text_color="#1f6aa5",
+                text="❌",
+                font=ctk.CTkFont(size=48)
+            )
+            icon_label.pack(pady=(0, 10))
+            
+            title_label = ctk.CTkLabel(
+                error_frame,
+                text="Search Failed",
+                font=ctk.CTkFont(size=16, weight="bold"),
+                text_color="red"
+            )
+            title_label.pack(pady=(0, 5))
+            
+            # Truncate long error messages
+            display_error = error_msg[:200] + "..." if len(error_msg) > 200 else error_msg
+            
+            error_label = ctk.CTkLabel(
+                error_frame,
+                text=display_error,
+                font=ctk.CTkFont(size=11),
+                text_color="gray",
                 wraplength=400,
                 justify="center"
             )
-            suggestion_label.pack()
+            error_label.pack(pady=(0, 15))
+            
+            # Helpful suggestion
+            suggestion = self._get_search_error_suggestion(error_msg)
+            if suggestion:
+                suggestion_label = ctk.CTkLabel(
+                    error_frame,
+                    text=f"💡 {suggestion}",
+                    font=ctk.CTkFont(size=10),
+                    text_color="#1f6aa5",
+                    wraplength=400,
+                    justify="center"
+                )
+                suggestion_label.pack()
+        except Exception as e:
+            print(f"⚠️ Error showing error UI: {e}")
         
         # Re-enable search
-        self.search_button.configure(state="normal", text="🔍 Search")
-        self.left_search_entry.configure(state="normal")
-        
-        # Reset state
-        self._set_ui_state("idle")
+        self._reset_search_ui()
         
         # Log error
         self._log(f"❌ Search failed: {error_msg}")
         
-        # Show error dialog
-        messagebox.showerror(
-            "Search Failed",
-            f"Failed to search Salesforce:\n\n{error_msg}\n\n{suggestion}"
-        )
+        # Show error dialog (non-blocking)
+        try:
+            self.after(100, lambda: messagebox.showerror(
+                "Search Failed",
+                f"Failed to search Salesforce:\n\n{error_msg}\n\n{suggestion if suggestion else ''}"
+            ))
+        except Exception as e:
+            print(f"⚠️ Error showing error dialog: {e}")
 
     def _get_search_error_suggestion(self, error_msg: str) -> str:
         """
@@ -1378,27 +1502,37 @@ class SalesforceExporterApp(ctk.CTkToplevel):
         suggestions_label.pack()
     
     def _on_search_cancelled(self):
-        """Handle search cancellation (e.g., user logged out during search)"""
+        """
+        Handle search cancellation (e.g., user logged out during search).
+        
+        ✅ FIXED: Proper state cleanup
+        """
+        # ✅ CRITICAL: Reset loading state
+        with self.state_lock:
+            self.is_loading = False
+            self._set_ui_state("idle")
         
         # Clear search loading state
-        for widget in self.tree_container.winfo_children():
-            widget.destroy()
+        try:
+            for widget in self.tree_container.winfo_children():
+                widget.destroy()
+        except Exception as e:
+            print(f"⚠️ Error clearing tree: {e}")
         
         # Show cancellation message
-        placeholder = ctk.CTkLabel(
-            self.tree_container,
-            text="Search cancelled",
-            text_color="gray",
-            font=ctk.CTkFont(size=12)
-        )
-        placeholder.grid(row=0, column=0, pady=30)
+        try:
+            placeholder = ctk.CTkLabel(
+                self.tree_container,
+                text="Search cancelled",
+                text_color="gray",
+                font=ctk.CTkFont(size=12)
+            )
+            placeholder.grid(row=0, column=0, pady=30)
+        except Exception as e:
+            print(f"⚠️ Error showing cancelled UI: {e}")
         
-        # Re-enable search
-        self.search_button.configure(state="normal", text="🔍 Search")
-        self.left_search_entry.configure(state="normal")
-        
-        # Reset UI state
-        self._set_ui_state("idle")
+        # Re-enable search UI
+        self._reset_search_ui()
         
         self._log("⚠️ Search cancelled")
     
@@ -1440,6 +1574,7 @@ class SalesforceExporterApp(ctk.CTkToplevel):
     def _on_search_button_clicked(self):
         """
         Handle search button click with caching.
+        ✅ FIXED: Better error handling and state checks
         """
         # Get search keyword
         keyword = self.left_search_entry.get().strip()
@@ -1455,9 +1590,16 @@ class SalesforceExporterApp(ctk.CTkToplevel):
             messagebox.showwarning("Keyword Too Short", "Please enter at least 2 characters.")
             return
         
-        # Check if already searching
+        # ✅ CRITICAL: Check if already searching
         if self.is_loading:
             self._log("⚠️ Search already in progress, please wait...")
+            messagebox.showinfo("Search In Progress", "Please wait for the current search to complete.")
+            return
+        
+        # ✅ CRITICAL: Check if exporting
+        if self._is_export_busy():
+            self._log("⚠️ Cannot search while export is running")
+            messagebox.showinfo("Export In Progress", "Please wait for export to complete before searching.")
             return
         
         # Check if session is valid
@@ -1487,61 +1629,133 @@ class SalesforceExporterApp(ctk.CTkToplevel):
         Shows loading state and calls _search_worker() in separate thread
         to prevent UI freezing during Salesforce API calls.
         
+        ✅ FIXED: Better state management and error handling
+        
         Args:
             keyword: Search term to find folders/reports
         """
-        # Set loading state
-        self._set_ui_state("loading")
+        # ✅ CRITICAL: Set loading state atomically
+        with self.state_lock:
+            if self.is_loading:
+                self._log("⚠️ Search already in progress")
+                return
+            
+            if self._is_export_busy():
+                self._log("⚠️ Cannot search while exporting")
+                return
+            
+            # Set loading state
+            self.is_loading = True
+            self._set_ui_state("loading")
         
         # Clear cancel event (fresh start)
         self.export_cancel_event.clear()
         
         # Disable search controls during search
-        self.search_button.configure(state="disabled", text="🔄 Searching...")
-        self.left_search_entry.configure(state="disabled")
+        try:
+            self.search_button.configure(state="disabled", text="🔄 Searching...")
+            self.left_search_entry.configure(state="disabled")
+        except Exception as e:
+            print(f"⚠️ Error disabling search UI: {e}")
         
         # Show loading indicator in tree
-        for widget in self.tree_container.winfo_children():
-            widget.destroy()
+        try:
+            for widget in self.tree_container.winfo_children():
+                widget.destroy()
+        except Exception as e:
+            print(f"⚠️ Error clearing tree: {e}")
         
-        loading_frame = ctk.CTkFrame(self.tree_container, fg_color="transparent")
-        loading_frame.grid(row=0, column=0, pady=50)
+        try:
+            loading_frame = ctk.CTkFrame(self.tree_container, fg_color="transparent")
+            loading_frame.grid(row=0, column=0, pady=50)
+            
+            # Loading spinner icon
+            loading_icon = ctk.CTkLabel(
+                loading_frame,
+                text="🔄",
+                font=ctk.CTkFont(size=48)
+            )
+            loading_icon.pack(pady=(0, 10))
+            
+            # Loading message
+            loading_label = ctk.CTkLabel(
+                loading_frame,
+                text="Searching Salesforce...",
+                text_color="gray",
+                font=ctk.CTkFont(size=14, weight="bold")
+            )
+            loading_label.pack(pady=(0, 5))
+            
+            # Keyword display
+            keyword_label = ctk.CTkLabel(
+                loading_frame,
+                text=f"Looking for: '{keyword}'",
+                text_color="#1f6aa5",
+                font=ctk.CTkFont(size=12)
+            )
+            keyword_label.pack()
+        except Exception as e:
+            print(f"⚠️ Error showing loading UI: {e}")
         
-        # Loading spinner icon
-        loading_icon = ctk.CTkLabel(
-            loading_frame,
-            text="🔄",
-            font=ctk.CTkFont(size=48)
-        )
-        loading_icon.pack(pady=(0, 10))
-        
-        # Loading message
-        loading_label = ctk.CTkLabel(
-            loading_frame,
-            text="Searching Salesforce...",
-            text_color="gray",
-            font=ctk.CTkFont(size=14, weight="bold")
-        )
-        loading_label.pack(pady=(0, 5))
-        
-        # Keyword display
-        keyword_label = ctk.CTkLabel(
-            loading_frame,
-            text=f"Looking for: '{keyword}'",
-            text_color="#1f6aa5",
-            font=ctk.CTkFont(size=12)
-        )
-        keyword_label.pack()
+        # ✅ CRITICAL: Force UI update before starting thread
+        try:
+            self.update_idletasks()
+        except:
+            pass
         
         # Start search in background thread (prevents UI freeze)
         thread = threading.Thread(
-            target=self._search_worker,
+            target=self._search_worker_safe,  # ✅ NEW: Use safe wrapper
             args=(keyword,),
-            daemon=True
+            daemon=True,
+            name=f"SearchThread-{keyword}"
         )
         thread.start()
+        
+        self._log(f"✅ Search thread started for: '{keyword}'")
     
-
+    def _search_worker_safe(self, keyword: str):
+        """
+        Safe wrapper for _search_worker that catches ALL exceptions.
+        
+        ✅ NEW: Prevents thread crashes from freezing the UI
+        """
+        try:
+            self._search_worker(keyword)
+        except Exception as e:
+            import traceback
+            error_details = traceback.format_exc()
+            
+            # Log full error
+            print(f"❌ SEARCH WORKER CRASH:")
+            print(error_details)
+            
+            # Queue error message to UI
+            self.update_queue.put(("log", f"❌ Search crashed: {str(e)}"))
+            self.update_queue.put(("search_error", f"Search failed: {str(e)}"))
+        finally:
+            # ✅ CRITICAL: Always reset loading state, even on crash
+            with self.state_lock:
+                self.is_loading = False
+                self._set_ui_state("idle")
+            
+            # Re-enable search UI
+            try:
+                self.after(0, self._reset_search_ui)
+            except:
+                pass
+            
+    def _reset_search_ui(self):
+        """
+        Reset search UI to normal state.
+        
+        ✅ NEW: Centralized UI reset after search completes/fails
+        """
+        try:
+            self.search_button.configure(state="normal", text="🔍 Search")
+            self.left_search_entry.configure(state="normal")
+        except Exception as e:
+            print(f"⚠️ Error resetting search UI: {e}")
 
     def _populate_tree_with_data(self, filtered_folders, total_reports_in_folders):
         """
@@ -2724,51 +2938,244 @@ class SalesforceExporterApp(ctk.CTkToplevel):
     def destroy(self):
         """
         Clean up resources before window destruction.
-        ✅ NEW: Properly cleanup virtual tree.
+        ✅ IMPROVED: Comprehensive cleanup
         """
+        # ✅ Set destruction flag to prevent new operations
+        self._is_being_destroyed = True
+        
+        # ✅ Cancel any ongoing operations
         try:
-            # Clean up virtual tree
+            self.export_cancel_event.set()
+        except:
+            pass
+        
+        # ✅ Clean up virtual tree
+        try:
             if self.virtual_tree:
                 self.virtual_tree.clear()
                 self.virtual_tree = None
         except:
             pass
         
-        # Call parent destroy
-        super().destroy()  
-
-    def _process_queue(self):
-        """Process updates from background threads"""
+        # ✅ Clean up tree items
         try:
-            while True:
-                item = self.update_queue.get_nowait()
-                
-                if isinstance(item, tuple):
-                    event_type = item[0]
-                    data = item[1] if len(item) > 1 else None
-                    
-                    if event_type == "search_complete":
-                        self._on_search_complete(data)
-                    elif event_type == "search_error":
-                        self._on_search_error(data)
-                    elif event_type == "search_cancelled":
-                        self._on_search_cancelled()
-                    elif event_type == "progress_with_name":
-                        self._on_export_progress_with_name(data)
-                    elif event_type == "progress":
-                        self._on_export_progress(data)
-                    elif event_type == "export_complete":
-                        self._on_export_complete(data)
-                    elif event_type == "export_error":
-                        self._on_export_error(data)
-                    elif event_type == "log":
-                        self._log(data)
-        
-        except queue.Empty:
+            self.tree_items.clear()
+        except:
             pass
         
-        # Schedule next check
-        self.after(100, self._process_queue)
+        # ✅ Cancel any pending timers
+        try:
+            if self._configure_timer:
+                self.after_cancel(self._configure_timer)
+        except:
+            pass
+        
+        try:
+            if self.search_timer:
+                self.after_cancel(self.search_timer)
+        except:
+            pass
+        
+        # ✅ Clear search cache
+        try:
+            self.search_cache.clear()
+        except:
+            pass
+        
+        # ✅ Clear selection
+        try:
+            self.selected_items.clear()
+        except:
+            pass
+        
+        # ✅ Clear queue
+        try:
+            while not self.update_queue.empty():
+                self.update_queue.get_nowait()
+        except:
+            pass
+        
+        # Call parent destroy
+        try:
+            super().destroy()
+        except:
+            pass
+
+    def _is_window_alive(self) -> bool:
+        """
+        Check if window still exists and is usable.
+        
+        ✅ NEW: Prevents operations on destroyed windows
+        
+        Returns:
+            True if window is alive, False otherwise
+        """
+        if self._is_being_destroyed:
+            return False
+        
+        try:
+            # Try to access a basic window property
+            _ = self.winfo_exists()
+            return True
+        except:
+            return False        
+    
+    def _recover_from_search_error(self):
+        """
+        Recover UI state after a search error.
+        
+        ✅ NEW: Ensures UI is always usable even after errors
+        """
+        # Reset all search-related state
+        with self.state_lock:
+            self.is_loading = False
+            self._set_ui_state("idle")
+        
+        # Clear cancel event
+        self.export_cancel_event.clear()
+        
+        # Reset search UI
+        self._reset_search_ui()
+        
+        # Show empty search state
+        try:
+            self._show_empty_search_state()
+        except:
+            pass
+        
+        self._log("🔄 Search state recovered - ready for new search")
+
+    def _debug_print_state(self):
+        """
+        Print current state for debugging.
+        
+        ✅ NEW: Helpful for troubleshooting
+        """
+        print("\n" + "="*60)
+        print("DEBUG: Current Application State")
+        print("="*60)
+        
+        try:
+            with self.state_lock:
+                print(f"  is_loading: {self.is_loading}")
+                print(f"  is_exporting: {self.is_exporting}")
+                print(f"  _export_state: {self._export_state}")
+                print(f"  _showing_dialog: {self._showing_dialog}")
+        except Exception as e:
+            print(f"  Error reading state: {e}")
+        
+        try:
+            with self.ui_lock:
+                print(f"  ui_state: {self.ui_state}")
+        except:
+            pass
+        
+        try:
+            print(f"  cancel_event.is_set(): {self.export_cancel_event.is_set()}")
+        except:
+            pass
+        
+        try:
+            print(f"  selected_items count: {len(self.selected_items)}")
+        except:
+            pass
+        
+        try:
+            print(f"  search_cache size: {len(self.search_cache)}")
+        except:
+            pass
+        
+        try:
+            print(f"  queue size: {self.update_queue.qsize()}")
+        except:
+            pass
+        
+        print("="*60 + "\n")
+
+    def _enable_debug_mode(self):
+        """
+        Enable debug mode with verbose logging.
+        
+        ✅ NEW: Call this if you need to debug issues
+        """
+        # Bind Ctrl+D to print debug state
+        self.bind('<Control-d>', lambda e: self._debug_print_state())
+        
+        self._log("🐛 Debug mode enabled - Press Ctrl+D to print state")
+
+
+
+    def _process_queue(self):
+        """
+        Process updates from background threads.
+        
+        ✅ FIXED: Better error handling for each event type
+        """
+        try:
+            # Process all queued items (up to 10 per cycle to prevent blocking)
+            processed = 0
+            max_per_cycle = 10
+            
+            while processed < max_per_cycle:
+                try:
+                    item = self.update_queue.get_nowait()
+                except queue.Empty:
+                    break
+                
+                processed += 1
+                
+                # ✅ SAFETY: Validate item structure
+                if not isinstance(item, tuple) or len(item) < 1:
+                    print(f"⚠️ Invalid queue item: {item}")
+                    continue
+                
+                event_type = item[0]
+                data = item[1] if len(item) > 1 else None
+                
+                # ✅ Handle each event type with error handling
+                try:
+                    if event_type == "search_complete":
+                        self._on_search_complete(data)
+                        
+                    elif event_type == "search_error":
+                        self._on_search_error(data)
+                        
+                    elif event_type == "search_cancelled":
+                        self._on_search_cancelled()
+                        
+                    elif event_type == "progress_with_name":
+                        self._on_export_progress_with_name(data)
+                        
+                    elif event_type == "progress":
+                        self._on_export_progress(data)
+                        
+                    elif event_type == "export_complete":
+                        self._on_export_complete(data)
+                        
+                    elif event_type == "export_error":
+                        self._on_export_error(data)
+                        
+                    elif event_type == "log":
+                        self._log(data)
+                        
+                    else:
+                        print(f"⚠️ Unknown event type: {event_type}")
+                        
+                except Exception as e:
+                    print(f"❌ Error processing event '{event_type}': {e}")
+                    import traceback
+                    traceback.print_exc()
+        
+        except Exception as e:
+            print(f"❌ Queue processor error: {e}")
+            import traceback
+            traceback.print_exc()
+        
+        # Schedule next check (100ms interval)
+        try:
+            self.after(100, self._process_queue)
+        except Exception as e:
+            print(f"❌ Cannot schedule queue processor: {e}")
 
 # ===== NO STANDALONE ENTRY POINT =====
 # This app is now launched via main.py's AppLauncher
