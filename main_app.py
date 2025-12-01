@@ -2836,9 +2836,18 @@ class SalesforceExporterApp(ctk.CTkToplevel):
                 base_name = filename.replace('.xlsx.zip', '').replace('.zip', '')
                 filename = f"{base_name}.zip"
         
-        # Update full path with current filename
+        # ✅ NEW: Check for filename conflicts and auto-resolve
         directory = os.path.dirname(self.output_zip_path)
-        self.output_zip_path = os.path.join(directory, filename)
+        unique_filename = self._get_unique_filename(directory, filename)
+
+        # Update full path with unique filename
+        self.output_zip_path = os.path.join(directory, unique_filename)
+
+        # ✅ NEW: If filename was changed due to conflict, update the entry field
+        if unique_filename != filename:
+            self.filename_entry.delete(0, "end")
+            self.filename_entry.insert(0, unique_filename)
+            self._log(f"⚠️ File already exists - renamed to: {unique_filename}")
         
         # Confirm export with format information
         count = len(self.selected_items)
@@ -2849,9 +2858,18 @@ class SalesforceExporterApp(ctk.CTkToplevel):
             f"Continue?"
         )
         
-        # ✅ CRITICAL: Clear dialog flag before checking result
+        # ✅ NEW: Auto-regenerate filename for next export
+        try:
+            self._generate_default_filename()
+            self._log("🔄 Filename reset for next export")
+        except Exception as e:
+            print(f"⚠️ Error regenerating filename: {e}")
+
+        # ✅ CRITICAL: Clear dialog flag after user interaction
         with self.state_lock:
             self._showing_dialog = False
+
+        print("✅ Completion handler finished")
         
         if not result:
             print("ℹ️ Export cancelled by user (dialog)")
@@ -3349,6 +3367,67 @@ class SalesforceExporterApp(ctk.CTkToplevel):
                 self._showing_dialog = False
         
         print("✅ Error handler finished")
+        
+        
+    def _get_unique_filename(self, directory: str, base_filename: str) -> str:
+        """
+        Generate a unique filename by appending counter if file exists.
+        
+        Examples:
+            salesforce_reports_20251201.zip
+            salesforce_reports_20251201_1.zip
+            salesforce_reports_20251201_2.zip
+        
+        """
+        import os
+        
+        # Build full path
+        full_path = os.path.join(directory, base_filename)
+        
+        # If file doesn't exist, use base filename as-is
+        if not os.path.exists(full_path):
+            return base_filename
+        
+        # File exists - need to append counter
+        # Extract name and extension
+        if '.' in base_filename:
+            name_part, ext_part = base_filename.rsplit('.', 1)
+            # Handle .xlsx.zip case
+            if ext_part == 'zip' and name_part.endswith('.xlsx'):
+                name_part = name_part[:-5]  # Remove .xlsx
+                ext_part = 'xlsx.zip'
+        else:
+            name_part = base_filename
+            ext_part = ''
+        
+        # Try appending _1, _2, _3... until we find an available name
+        counter = 1
+        max_attempts = 1000  # Safety limit
+        
+        while counter < max_attempts:
+            # Generate new filename with counter
+            if ext_part:
+                new_filename = f"{name_part}_{counter}.{ext_part}"
+            else:
+                new_filename = f"{name_part}_{counter}"
+            
+            new_full_path = os.path.join(directory, new_filename)
+            
+            # Check if this filename is available
+            if not os.path.exists(new_full_path):
+                return new_filename
+            
+            counter += 1
+        
+        # Fallback: append timestamp if somehow we hit the limit
+        import time
+        timestamp = int(time.time())
+        if ext_part:
+            return f"{name_part}_{timestamp}.{ext_part}"
+        else:
+            return f"{name_part}_{timestamp}"     
+
+
     
     def _get_helpful_error_message(self, error_msg: str) -> str:
         """Get helpful suggestion based on error message"""
