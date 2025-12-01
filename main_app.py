@@ -216,6 +216,7 @@ class SalesforceExporterApp(ctk.CTkToplevel):
         
         # Center window on screen
         self.after(100, self._center_window)
+        self.after(1000, self._check_excel_dependencies)
         
         # Start queue processor
         self._process_queue()
@@ -805,16 +806,23 @@ class SalesforceExporterApp(ctk.CTkToplevel):
         )
         self.clear_selected_button.grid(row=1, column=0, sticky="ew", pady=(0, 3))  # ✅ REDUCED from pady=(0, 5)
     
+    
     def _create_bottom_section(self):
-        """Create bottom section with file naming, progress, export button, and log"""
+        """Create bottom section with left/right split layout and export format selection"""
         
         bottom_frame = ctk.CTkFrame(self, corner_radius=0)
         bottom_frame.grid(row=2, column=0, sticky="ew", padx=0, pady=0)
-        bottom_frame.grid_columnconfigure(0, weight=1)
+        bottom_frame.grid_columnconfigure(0, weight=1)  # Left side expands
+        bottom_frame.grid_columnconfigure(1, weight=1)  # Right side expands
+        
+        # ========== LEFT SIDE: File Naming & Save Location ==========
+        left_section = ctk.CTkFrame(bottom_frame, fg_color="transparent")
+        left_section.grid(row=0, column=0, sticky="nsew", padx=(10, 5), pady=(10, 5))
+        left_section.grid_columnconfigure(0, weight=1)
         
         # File naming section
-        file_frame = ctk.CTkFrame(bottom_frame)
-        file_frame.grid(row=0, column=0, sticky="ew", padx=10, pady=(10, 5))
+        file_frame = ctk.CTkFrame(left_section)
+        file_frame.grid(row=0, column=0, sticky="ew", pady=(0, 5))
         file_frame.grid_columnconfigure(1, weight=1)
         
         # ZIP Filename label
@@ -832,14 +840,14 @@ class SalesforceExporterApp(ctk.CTkToplevel):
             placeholder_text="salesforce_reports_20251126_0026.zip",
             height=35
         )
-        self.filename_entry.grid(row=0, column=1, sticky="ew", padx=(0, 10), pady=10)
+        self.filename_entry.grid(row=0, column=1, sticky="ew", padx=(0, 15), pady=10)
         
         # Auto-generate timestamp filename
         self._generate_default_filename()
         
         # Save location section
-        location_frame = ctk.CTkFrame(bottom_frame)
-        location_frame.grid(row=1, column=0, sticky="ew", padx=10, pady=(0, 5))
+        location_frame = ctk.CTkFrame(left_section)
+        location_frame.grid(row=1, column=0, sticky="ew", pady=(0, 5))
         location_frame.grid_columnconfigure(1, weight=1)
         
         location_label = ctk.CTkLabel(
@@ -867,51 +875,119 @@ class SalesforceExporterApp(ctk.CTkToplevel):
         )
         self.browse_button.grid(row=0, column=2, padx=(0, 15), pady=10)
         
-        # Export button
+        # ✅ NEW: Export Format Selection Section
+        format_frame = ctk.CTkFrame(left_section)
+        format_frame.grid(row=2, column=0, sticky="ew", pady=(0, 5))
+        format_frame.grid_columnconfigure(1, weight=1)
+        
+        format_label = ctk.CTkLabel(
+            format_frame,
+            text="Export Format:",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            width=120
+        )
+        format_label.grid(row=0, column=0, padx=(15, 10), pady=10, sticky="w")
+        
+        # Radio button container
+        radio_container = ctk.CTkFrame(format_frame, fg_color="transparent")
+        radio_container.grid(row=0, column=1, sticky="w", padx=(0, 15), pady=10)
+        
+        # ✅ NEW: Export format variable (default: CSV)
+        self.export_format = ctk.StringVar(value="csv")
+        
+        # CSV Radio Button
+        self.csv_radio = ctk.CTkRadioButton(
+            radio_container,
+            text="CSV Format (.csv)",
+            variable=self.export_format,
+            value="csv",
+            font=ctk.CTkFont(size=12),
+            command=self._on_format_changed
+        )
+        self.csv_radio.pack(side="left", padx=(0, 20))
+        
+        # Excel Radio Button
+        self.excel_radio = ctk.CTkRadioButton(
+            radio_container,
+            text="Excel Format (.xlsx)",
+            variable=self.export_format,
+            value="xlsx",
+            font=ctk.CTkFont(size=12),
+            command=self._on_format_changed
+        )
+        self.excel_radio.pack(side="left")
+        
+        # Format description label
+        self.format_description = ctk.CTkLabel(
+            format_frame,
+            text="💡 CSV is faster for large exports",
+            font=ctk.CTkFont(size=10),
+            text_color="gray"
+        )
+        self.format_description.grid(row=1, column=1, sticky="w", padx=(0, 15), pady=(0, 5))
+        
+        # ========== RIGHT SIDE: Export Button & Progress ==========
+        right_section = ctk.CTkFrame(bottom_frame, fg_color="transparent")
+        right_section.grid(row=0, column=1, sticky="nsew", padx=(5, 10), pady=(10, 5))
+        right_section.grid_columnconfigure(0, weight=1)
+        right_section.grid_rowconfigure(1, weight=1)  # Progress section expands
+        
+        # Export button (positioned at top-right)
+        export_button_container = ctk.CTkFrame(right_section, fg_color="transparent")
+        export_button_container.grid(row=0, column=0, sticky="ew", pady=(0, 5))
+        export_button_container.grid_columnconfigure(0, weight=1)
+        
         self.export_button = ctk.CTkButton(
-            bottom_frame,
+            export_button_container,
             text="🚀 Export Reports",
-            command=self._start_export_safe,  # ← Use safe wrapper
+            command=self._start_export_safe,
             height=45,
             font=ctk.CTkFont(size=15, weight="bold"),
             fg_color="#1f6aa5",
             hover_color="#144870",
             state="disabled"
         )
-        self.export_button.grid(row=2, column=0, sticky="ew", padx=10, pady=(0, 5))
+        self.export_button.grid(row=0, column=0, sticky="ew", padx=(0, 0))
         
-        # Cancel button (hidden by default)
+        # Cancel button (hidden by default, overlays export button)
         self.cancel_button = ctk.CTkButton(
-            bottom_frame,
+            export_button_container,
             text="🛑 Cancel Export",
             command=self._cancel_export,
-            height=38,
-            font=ctk.CTkFont(size=14, weight="bold"),
+            height=45,
+            font=ctk.CTkFont(size=15, weight="bold"),
             fg_color="#d32f2f",
             hover_color="#9a2222",
             state="disabled"
         )
-        self.cancel_button.grid(row=2, column=0, sticky="ew", padx=8, pady=(0, 4))
+        self.cancel_button.grid(row=0, column=0, sticky="ew", padx=(0, 0))
         self.cancel_button.grid_remove()  # Hide initially
         self.cancel_button.lower()
-         
+        
+        # Progress section
+        progress_section = ctk.CTkFrame(right_section)
+        progress_section.grid(row=1, column=0, sticky="nsew", pady=(5, 0))
+        progress_section.grid_columnconfigure(0, weight=1)
+        progress_section.grid_rowconfigure(0, weight=0)
+        progress_section.grid_rowconfigure(1, weight=0)
+        
         # Progress bar
-        self.progress_bar = ctk.CTkProgressBar(bottom_frame, height=20)
-        self.progress_bar.grid(row=3, column=0, sticky="ew", padx=10, pady=(0, 5))
+        self.progress_bar = ctk.CTkProgressBar(progress_section, height=20)
+        self.progress_bar.grid(row=0, column=0, sticky="ew", padx=10, pady=(10, 5))
         self.progress_bar.set(0)
         
         # Progress label
         self.progress_label = ctk.CTkLabel(
-            bottom_frame,
+            progress_section,
             text="Ready to export",
             font=ctk.CTkFont(size=11),
             text_color="gray"
         )
-        self.progress_label.grid(row=4, column=0, sticky="w", padx=15, pady=(0, 5))
+        self.progress_label.grid(row=1, column=0, sticky="w", padx=15, pady=(0, 10))
         
-        # Activity Log section
+        # ========== BOTTOM ROW: Activity Log (spans both columns) ==========
         log_frame = ctk.CTkFrame(bottom_frame, height=150)
-        log_frame.grid(row=5, column=0, sticky="ew", padx=10, pady=(5, 10))
+        log_frame.grid(row=1, column=0, columnspan=2, sticky="ew", padx=10, pady=(5, 10))
         log_frame.grid_propagate(False)
         log_frame.grid_rowconfigure(1, weight=1)
         log_frame.grid_columnconfigure(0, weight=1)
@@ -946,13 +1022,126 @@ class SalesforceExporterApp(ctk.CTkToplevel):
         self.log_textbox.grid(row=1, column=0, sticky="nsew", padx=10, pady=(0, 10))
         self.log_textbox.configure(state="disabled")
     
+    def _on_format_changed(self):
+        """
+        Handle export format radio button change.
+        Updates filename extension and description text.
+        
+        ✅ Thread-safe and updates UI immediately
+        """
+        selected_format = self.export_format.get()
+        
+        # Get current filename
+        current_filename = self.filename_entry.get().strip()
+        
+        # Update filename extension
+        if selected_format == "csv":
+            # Change to .zip (CSV exports are zipped)
+            if current_filename.endswith('.xlsx.zip'):
+                new_filename = current_filename.replace('.xlsx.zip', '.zip')
+            elif current_filename.endswith('.xlsx'):
+                new_filename = current_filename.replace('.xlsx', '.zip')
+            elif not current_filename.endswith('.zip'):
+                # Remove any extension and add .zip
+                base_name = current_filename.rsplit('.', 1)[0] if '.' in current_filename else current_filename
+                new_filename = f"{base_name}.zip"
+            else:
+                new_filename = current_filename
+            
+            # Update description
+            self.format_description.configure(
+                text="💡 CSV is faster for large exports",
+                text_color="gray"
+            )
+            
+            self._log("📄 Export format: CSV (zipped)")
+            
+        else:  # xlsx
+            # Change to .xlsx.zip (Excel exports are also zipped)
+            if current_filename.endswith('.zip') and not current_filename.endswith('.xlsx.zip'):
+                new_filename = current_filename.replace('.zip', '.xlsx.zip')
+            elif not current_filename.endswith('.xlsx.zip'):
+                # Remove any extension and add .xlsx.zip
+                base_name = current_filename.rsplit('.', 1)[0] if '.' in current_filename else current_filename
+                new_filename = f"{base_name}.xlsx.zip"
+            else:
+                new_filename = current_filename
+            
+            # Update description
+            self.format_description.configure(
+                text="💡 Excel format includes formatting and is easier to open",
+                text_color="#1f6aa5"
+            )
+            
+            self._log("📊 Export format: Excel (.xlsx, zipped)")
+        
+        # Update filename entry
+        self.filename_entry.delete(0, "end")
+        self.filename_entry.insert(0, new_filename)
+        
+        # Update export button state (in case it affects validation)
+        self._update_export_button_state()   
+    
+    
     def _generate_default_filename(self):
-        """Generate default filename with timestamp"""
+        """
+        Generate default filename with timestamp.
+        
+        ✅ UPDATED: Now considers export format
+        """
         timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M')
-        default_name = f"salesforce_reports_{timestamp}.zip"
+        
+        # Check current format selection (if initialized)
+        try:
+            selected_format = self.export_format.get()
+        except:
+            # Not initialized yet, default to CSV
+            selected_format = "csv"
+        
+        if selected_format == "xlsx":
+            default_name = f"salesforce_reports_{timestamp}.xlsx.zip"
+        else:
+            default_name = f"salesforce_reports_{timestamp}.zip"
+        
         self.filename_entry.delete(0, "end")
         self.filename_entry.insert(0, default_name)
-    
+
+
+    def _validate_export_ready(self) -> tuple[bool, str]:
+        """
+        Validate if export is ready to start.
+        
+        ✅ NEW: Centralized validation logic
+        
+        Returns:
+            (is_valid, error_message) tuple
+        """
+        if not self.session_info:
+            return (False, "Not logged in. Please login first.")
+        
+        if not self.output_zip_path:
+            return (False, "No save location selected. Click Browse to select a location.")
+        
+        if not self.selected_items:
+            return (False, "No reports selected. Please select at least one report to export.")
+        
+        filename = self.filename_entry.get().strip()
+        if not filename:
+            return (False, "Please enter a filename.")
+        
+        # Validate filename has correct extension
+        selected_format = self.export_format.get()
+        
+        if selected_format == "xlsx":
+            if not filename.endswith('.xlsx.zip'):
+                return (False, "Filename must end with .xlsx.zip for Excel format")
+        else:
+            if not filename.endswith('.zip'):
+                return (False, "Filename must end with .zip for CSV format")
+        
+        return (True, "")
+
+   
     
     # ===== LOGGING =====
     
@@ -2000,6 +2189,33 @@ class SalesforceExporterApp(ctk.CTkToplevel):
         # Update export button state
         self._update_export_button_state()
     
+    def _check_excel_dependencies(self):
+        """
+        Check if Excel export dependencies are installed.
+        Shows a warning if missing but doesn't block the app.
+        
+        ✅ Called during app initialization
+        """
+        try:
+            import openpyxl
+            self._excel_available = True
+            self._log("✅ Excel export available (openpyxl installed)")
+        except ImportError:
+            self._excel_available = False
+            self._log("⚠️ Excel export unavailable - openpyxl not installed")
+            self._log("💡 Install with: pip install openpyxl")
+            
+            # Disable Excel radio button
+            try:
+                self.excel_radio.configure(state="disabled")
+                self.format_description.configure(
+                    text="⚠️ Excel export requires 'openpyxl' library (pip install openpyxl)",
+                    text_color="orange"
+                )
+            except:
+                pass
+    
+    
     def _on_report_checkbox_changed_virtual(self, report_id: str, report_name: str, folder_id: str, checkbox_var: ctk.BooleanVar):
         """
         Handle individual report checkbox change from virtual tree.
@@ -2283,15 +2499,37 @@ class SalesforceExporterApp(ctk.CTkToplevel):
     # ===== BROWSE SAVE LOCATION =====
     
     def _browse_save_location(self):
-        """Browse for save location"""
+        """
+        Browse for save location.
+        
+        ✅ UPDATED: Handles both CSV and Excel formats
+        """
         
         # Get filename from entry
         filename = self.filename_entry.get().strip()
         if not filename:
-            filename = f"salesforce_reports_{datetime.datetime.now().strftime('%Y%m%d_%H%M')}.zip"
+            # Generate default based on format
+            timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M')
+            selected_format = self.export_format.get()
+            
+            if selected_format == "xlsx":
+                filename = f"salesforce_reports_{timestamp}.xlsx.zip"
+            else:
+                filename = f"salesforce_reports_{timestamp}.zip"
         
-        if not filename.endswith('.zip'):
-            filename += '.zip'
+        # Ensure correct extension based on format
+        selected_format = self.export_format.get()
+        
+        if selected_format == "xlsx":
+            if not filename.endswith('.xlsx.zip'):
+                # Fix extension
+                base_name = filename.rsplit('.', 1)[0] if '.' in filename else filename
+                filename = f"{base_name}.xlsx.zip"
+        else:
+            if not filename.endswith('.zip') or filename.endswith('.xlsx.zip'):
+                # Fix extension
+                base_name = filename.replace('.xlsx.zip', '').replace('.zip', '')
+                filename = f"{base_name}.zip"
         
         # Open directory dialog
         directory = filedialog.askdirectory(
@@ -2309,8 +2547,14 @@ class SalesforceExporterApp(ctk.CTkToplevel):
             self.location_entry.insert(0, directory)
             self.location_entry.configure(state="readonly")
             
+            # Update filename entry with corrected name
+            self.filename_entry.delete(0, "end")
+            self.filename_entry.insert(0, filename)
+            
+            format_name = "Excel" if selected_format == "xlsx" else "CSV"
             self._log(f"💾 Save location: {directory}")
             self._log(f"📦 Full path: {full_path}")
+            self._log(f"📋 Format: {format_name}")
             
             self._update_export_button_state()
     
@@ -2418,6 +2662,8 @@ class SalesforceExporterApp(ctk.CTkToplevel):
         """
         Start the export process.
         
+        ✅ UPDATED: Now handles both CSV and Excel formats with proper validation
+        
         IMPROVED: Proper state management with atomic transitions.
         """
         # ✅ GUARD: Set dialog flag atomically
@@ -2433,45 +2679,43 @@ class SalesforceExporterApp(ctk.CTkToplevel):
             # Mark that we're showing dialog
             self._showing_dialog = True
         
-        # Validation checks
-        if not self.session_info:
-            with self.state_lock:
-                self._showing_dialog = False
-            messagebox.showwarning("Not Logged In", "Please login first.")
-            return
+        # ✅ NEW: Use centralized validation
+        is_valid, error_msg = self._validate_export_ready()
         
-        if not self.output_zip_path:
+        if not is_valid:
             with self.state_lock:
                 self._showing_dialog = False
-            messagebox.showwarning("No Location", "Please select a save location.")
-            return
-        
-        if not self.selected_items:
-            with self.state_lock:
-                self._showing_dialog = False
-            messagebox.showwarning("No Selection", "Please select at least one report to export.")
+            messagebox.showwarning("Cannot Export", error_msg)
             return
         
         # Get filename from entry
         filename = self.filename_entry.get().strip()
-        if not filename:
-            with self.state_lock:
-                self._showing_dialog = False
-            messagebox.showwarning("No Filename", "Please enter a filename.")
-            return
         
-        if not filename.endswith('.zip'):
-            filename += '.zip'
+        # Get selected format
+        selected_format = self.export_format.get()
+        format_name = "Excel (.xlsx)" if selected_format == "xlsx" else "CSV"
+        
+        # Validate and fix filename extension if needed
+        if selected_format == "xlsx":
+            if not filename.endswith('.xlsx.zip'):
+                base_name = filename.replace('.xlsx.zip', '').replace('.zip', '')
+                filename = f"{base_name}.xlsx.zip"
+        else:
+            if not filename.endswith('.zip') or filename.endswith('.xlsx.zip'):
+                base_name = filename.replace('.xlsx.zip', '').replace('.zip', '')
+                filename = f"{base_name}.zip"
         
         # Update full path with current filename
         directory = os.path.dirname(self.output_zip_path)
         self.output_zip_path = os.path.join(directory, filename)
         
-        # Confirm export
+        # Confirm export with format information
         count = len(self.selected_items)
         result = messagebox.askyesno(
             "Confirm Export",
-            f"Export {count} report(s) to:\n\n{self.output_zip_path}\n\nContinue?"
+            f"Export {count} report(s) in {format_name} format to:\n\n"
+            f"{self.output_zip_path}\n\n"
+            f"Continue?"
         )
         
         # ✅ CRITICAL: Clear dialog flag before checking result
@@ -2492,7 +2736,15 @@ class SalesforceExporterApp(ctk.CTkToplevel):
         self._set_export_ui_state(False)
         
         self._log(f"🚀 Starting export of {count} selected reports...")
+        self._log(f"📋 Format: {format_name}")
         self._log(f"📦 Destination: {self.output_zip_path}")
+        
+        # ✅ NEW: Log format-specific information
+        if selected_format == "xlsx":
+            self._log("💡 Excel format: Each report will be converted to .xlsx")
+            self._log("⚠️ Note: Excel export may be slower for large reports")
+        else:
+            self._log("💡 CSV format: Fast export, suitable for large datasets")
         
         # Get list of report IDs
         report_ids = list(self.selected_items.keys())
@@ -2509,12 +2761,13 @@ class SalesforceExporterApp(ctk.CTkToplevel):
         # ✅ Start export in BACKGROUND THREAD (UI stays responsive)
         thread = threading.Thread(
             target=self._export_worker,
-            args=(report_ids,),
-            daemon=True
+            args=(report_ids, selected_format),  # ✅ NEW: Pass format to worker
+            daemon=True,
+            name=f"ExportThread-{selected_format}"
         )
         thread.start()
         
-        print("✅ Export thread started")
+        print(f"✅ Export thread started (format: {selected_format})")
 
     def _start_export_safe(self):
         """
@@ -2539,18 +2792,23 @@ class SalesforceExporterApp(ctk.CTkToplevel):
         
         # All checks passed - proceed with export
         self._start_export()
+
         
-    def _export_worker(self, report_ids: List[str]):
+    def _export_worker(self, report_ids: List[str], export_format: str = "csv"):
         """
         Background worker for export with concurrent downloads.
         
-        ✅ OPTIMIZED: Passes report metadata to avoid redundant API calls.
+        ✅ UPDATED: Now supports both CSV and Excel formats with proper threading
+        
+        Args:
+            report_ids: List of report IDs to export
+            export_format: Either "csv" or "xlsx"
         """
         try:
             session_id = self.session_info.get("session_id")
             instance_url = self.session_info.get("instance_url")
             
-            # ✅ NEW: Build metadata dict from already-loaded data
+            # ✅ Build metadata dict from already-loaded data
             reports_metadata = {}
             
             with self.data_lock:
@@ -2569,7 +2827,8 @@ class SalesforceExporterApp(ctk.CTkToplevel):
                 """Progress callback - called when report starts/completes"""
                 if report_name:
                     self.update_queue.put(("progress_with_name", (done, total, report_name)))
-                    self.update_queue.put(("log", f"  🔥 Downloading: {report_name}"))
+                    format_icon = "📊" if export_format == "xlsx" else "📄"
+                    self.update_queue.put(("log", f"  {format_icon} Downloading: {report_name}"))
                     return
                 
                 self.update_queue.put(("progress", (done, total)))
@@ -2590,22 +2849,35 @@ class SalesforceExporterApp(ctk.CTkToplevel):
             )
             
             # Log export start
-            self.update_queue.put(("log", f"🚀 Starting concurrent export of {len(report_ids)} reports..."))
+            format_name = "Excel (.xlsx)" if export_format == "xlsx" else "CSV"
+            self.update_queue.put(("log", f"🚀 Starting concurrent export of {len(report_ids)} reports in {format_name} format..."))
             
             # Check cancellation before export
             if self.export_cancel_event.is_set():
                 self.update_queue.put(("export_cancelled", None))
                 return
             
-            # ✅ OPTIMIZED: Pass metadata to avoid redundant API calls
-            result = exporter.export_selected_reports_to_zip_concurrent(
-                self.output_zip_path,
-                report_ids,
-                max_workers=10,
-                cancel_event=self.export_cancel_event,
-                retry_attempts=3,
-                reports_metadata=reports_metadata  # ✅ NEW: Pass cached metadata
-            )
+            # ✅ NEW: Call different export method based on format
+            if export_format == "xlsx":
+                # Excel export
+                result = exporter.export_selected_reports_to_zip_concurrent_excel(
+                    self.output_zip_path,
+                    report_ids,
+                    max_workers=10,
+                    cancel_event=self.export_cancel_event,
+                    retry_attempts=3,
+                    reports_metadata=reports_metadata
+                )
+            else:
+                # CSV export (existing method)
+                result = exporter.export_selected_reports_to_zip_concurrent(
+                    self.output_zip_path,
+                    report_ids,
+                    max_workers=10,
+                    cancel_event=self.export_cancel_event,
+                    retry_attempts=3,
+                    reports_metadata=reports_metadata
+                )
             
             self.update_queue.put(("export_complete", result))
             
@@ -2883,6 +3155,8 @@ class SalesforceExporterApp(ctk.CTkToplevel):
         """
         Handle export error with proper state cleanup.
         
+        ✅ UPDATED: Better handling for Excel dependency errors
+        
         IMPROVED: Ensures state is reset even on errors.
         """
         print(f"❌ Export error handler called: {error_msg}")
@@ -2912,8 +3186,19 @@ class SalesforceExporterApp(ctk.CTkToplevel):
         self._log(f"📊 Error: {error_msg}")
         self._log("=" * 50)
         
-        # Provide helpful error message
-        helpful_msg = self._get_helpful_error_message(error_msg)
+        # ✅ NEW: Check if it's an Excel dependency error
+        if "openpyxl" in error_msg.lower():
+            helpful_msg = (
+                "Excel export requires the 'openpyxl' library.\n\n"
+                "To install it:\n"
+                "1. Close this application\n"
+                "2. Run: pip install openpyxl\n"
+                "3. Restart the application\n\n"
+                "Alternatively, use CSV format for your export."
+            )
+        else:
+            # Provide helpful error message for other errors
+            helpful_msg = self._get_helpful_error_message(error_msg)
         
         # ✅ GUARD: Check if already showing dialog
         with self.state_lock:

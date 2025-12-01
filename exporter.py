@@ -758,6 +758,548 @@ class SalesforceReportExporter:
         
         return cleaned_content
     
+    def _csv_to_excel(self, csv_content: str, output_path: str) -> bool:
+        """
+        Convert CSV content to Excel (.xlsx) file.
+        
+        ✅ Thread-safe conversion with proper error handling
+        
+        Args:
+            csv_content: Raw CSV string content
+            output_path: Path where .xlsx file should be saved
+            
+        Returns:
+            True if conversion successful, False otherwise
+        """
+        try:
+            import csv
+            from io import StringIO
+            
+            # Try to import openpyxl for Excel writing
+            try:
+                from openpyxl import Workbook
+                from openpyxl.styles import Font, PatternFill, Alignment
+                from openpyxl.utils import get_column_letter
+            except ImportError:
+                print("❌ openpyxl not installed. Install with: pip install openpyxl")
+                return False
+            
+            # Parse CSV content
+            csv_reader = csv.reader(StringIO(csv_content))
+            rows = list(csv_reader)
+            
+            if not rows:
+                print("⚠️ No data to convert")
+                return False
+            
+            # Create Excel workbook
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "Report Data"
+            
+            # Write data to Excel
+            for row_idx, row_data in enumerate(rows, start=1):
+                for col_idx, cell_value in enumerate(row_data, start=1):
+                    cell = ws.cell(row=row_idx, column=col_idx, value=cell_value)
+                    
+                    # Style header row (first row)
+                    if row_idx == 1:
+                        cell.font = Font(bold=True, color="FFFFFF")
+                        cell.fill = PatternFill(start_color="1F6AA5", end_color="1F6AA5", fill_type="solid")
+                        cell.alignment = Alignment(horizontal="center", vertical="center")
+            
+            # Auto-adjust column widths (with reasonable limits)
+            for column in ws.columns:
+                max_length = 0
+                column_letter = get_column_letter(column[0].column)
+                
+                for cell in column:
+                    try:
+                        if cell.value:
+                            cell_length = len(str(cell.value))
+                            if cell_length > max_length:
+                                max_length = cell_length
+                    except:
+                        pass
+                
+                # Set width with min 10, max 50 characters
+                adjusted_width = min(max(max_length + 2, 10), 50)
+                ws.column_dimensions[column_letter].width = adjusted_width
+            
+            # Freeze header row
+            ws.freeze_panes = "A2"
+            
+            # Save Excel file
+            wb.save(output_path)
+            
+            return True
+            
+        except Exception as e:
+            print(f"❌ CSV to Excel conversion error: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return False   
+    
+    def _export_report_excel(self, report_id: str, timeout: int = 120) -> tuple[bool, str]:
+        """
+        Export a single report as Excel (.xlsx) file.
+        
+        ✅ First exports as CSV, then converts to Excel
+        
+        Args:
+            report_id: Salesforce report ID
+            timeout: Request timeout in seconds
+            
+        Returns:
+            (success, content_or_error) tuple
+        """
+        try:
+            # Step 1: Get CSV content (reuse existing method)
+            csv_content = self.export_report_csv(report_id, timeout=timeout)
+            
+            if not csv_content or len(csv_content.strip()) == 0:
+                return (False, "Empty CSV content received")
+            
+            # CSV content is valid, return it for conversion
+            # Conversion will happen in the caller to avoid temp file handling here
+            return (True, csv_content)
+            
+        except Exception as e:
+            error_msg = str(e)
+            return (False, error_msg)    
+    
+    def _validate_excel_dependencies(self) -> tuple[bool, str]:
+        """
+        Check if required Excel libraries are installed.
+        
+        ✅ Validates openpyxl availability
+        
+        Returns:
+            (is_valid, error_message) tuple
+        """
+        try:
+            import openpyxl
+            return (True, "")
+        except ImportError:
+            error_msg = (
+                "Excel export requires 'openpyxl' library.\n\n"
+                "Install with:\n"
+                "  pip install openpyxl\n\n"
+                "Then restart the application."
+            )
+            return (False, error_msg)
+
+    def _create_excel_summary(
+        self,
+        total: int,
+        successful: List[str],
+        failed: List[Dict[str, Any]],
+        folder_name: str = "Unknown"
+    ) -> str:
+        """
+        Create a summary for Excel exports.
+        
+        ✅ Similar to _create_summary but Excel-specific
+        
+        Args:
+            total: Total number of reports
+            successful: List of successful report names
+            failed: List of failed report dictionaries
+            folder_name: Name of the folder/export batch
+            
+        Returns:
+            Summary text string
+        """
+        lines = [
+            "SALESFORCE REPORT EXPORT SUMMARY (EXCEL FORMAT)",
+            "=" * 50,
+            f"Export Date: {time.strftime('%Y-%m-%d %H:%M:%S')}",
+            f"Instance: {self.instance_url}",
+            f"API Version: {self.api_version}",
+            f"Folder: {folder_name}",
+            f"Format: Excel (.xlsx)",
+            "",
+            f"Total Reports: {total}",
+            f"Successful: {len(successful)}",
+            f"Failed: {len(failed)}",
+            "",
+        ]
+        
+        if successful:
+            lines.append("SUCCESSFUL EXPORTS:")
+            lines.append("-" * 50)
+            for name in successful[:20]:  # Limit to first 20
+                lines.append(f"✓ {name}")
+            if len(successful) > 20:
+                lines.append(f"... and {len(successful) - 20} more")
+            lines.append("")
+        
+        if failed:
+            lines.append("FAILED EXPORTS:")
+            lines.append("-" * 50)
+            for f in failed:
+                lines.append(f"✗ {f.get('name')} ({f.get('type')})")
+                lines.append(f"  ID: {f.get('id')}")
+                lines.append(f"  Error: {f.get('error')}")
+                lines.append("")
+        
+        lines.append("=" * 50)
+        lines.append("")
+        lines.append("NOTE: Excel files may be larger than CSV equivalents.")
+        lines.append("For very large reports (10,000+ rows), CSV format is recommended.")
+        
+        return "\n".join(lines)   
+
+    def export_selected_reports_to_zip_concurrent_excel(
+        self,
+        output_zip_path: str,
+        report_ids: List[str],
+        max_workers: int = 10,
+        cancel_event: Optional[Any] = None,
+        retry_attempts: int = 3,
+        reports_metadata: Optional[Dict[str, Dict]] = None
+    ) -> Dict[str, Any]:
+        """
+        Export specific selected reports to Excel format (.xlsx) in a ZIP file using CONCURRENT downloads.
+        
+        ✅ NEW METHOD: Excel-specific export with CSV → XLSX conversion
+        
+        Similar to export_selected_reports_to_zip_concurrent but converts each CSV to Excel format.
+        
+        Args:
+            output_zip_path: Path where ZIP file will be saved
+            report_ids: List of report IDs to export
+            max_workers: Number of parallel downloads (default 10)
+            cancel_event: Threading event to signal cancellation
+            retry_attempts: Number of retry attempts for failed reports
+            reports_metadata: Optional dict of {report_id: {name, format}} to skip metadata fetch
+            
+        Returns:
+            Dictionary with export results
+        """
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        import threading
+        
+        # ✅ First, validate Excel dependencies
+        is_valid, error_msg = self._validate_excel_dependencies()
+        if not is_valid:
+            raise Exception(error_msg)
+        
+        tmp_dir = Path(tempfile.mkdtemp(prefix="sf_reports_excel_"))
+        
+        try:
+            # ===== STEP 1: Get/validate metadata =====
+            print(f"📊 Preparing to export {len(report_ids)} reports as Excel...")
+            
+            # Use provided metadata if available, else fetch
+            if reports_metadata:
+                print("⚡ Using cached metadata (skipping API calls)")
+                reports = []
+                for report_id in report_ids:
+                    if report_id in reports_metadata:
+                        reports.append(reports_metadata[report_id])
+                    else:
+                        reports.append({
+                            "id": report_id,
+                            "name": report_id,
+                            "reportFormat": "TABULAR"
+                        })
+            else:
+                print("🔍 Fetching report metadata...")
+                if not report_ids:
+                    reports = []
+                else:
+                    chunk_size = 50
+                    reports = []
+                    
+                    for i in range(0, len(report_ids), chunk_size):
+                        if cancel_event and cancel_event.is_set():
+                            raise Exception("Export cancelled by user")
+                        
+                        chunk_ids = report_ids[i:i + chunk_size]
+                        ids_formatted = ",".join([f"'{rid}'" for rid in chunk_ids])
+                        
+                        base_query = f"""
+                            SELECT Id, Name, Format 
+                            FROM Report 
+                            WHERE Id IN ({ids_formatted})
+                        """
+                        
+                        try:
+                            chunk_records = self._query_with_pagination(
+                                base_query.strip(), 
+                                batch_size=2000,
+                                cancel_event=cancel_event
+                            )
+                            
+                            for record in chunk_records:
+                                reports.append({
+                                    "id": record.get("Id"),
+                                    "name": record.get("Name"),
+                                    "reportFormat": record.get("Format", "TABULAR")
+                                })
+                        except Exception as e:
+                            print(f"⚠️ Error fetching report chunk {i//chunk_size + 1}: {str(e)[:100]}")
+                            for rid in chunk_ids:
+                                reports.append({
+                                    "id": rid,
+                                    "name": rid,
+                                    "reportFormat": "TABULAR"
+                                })
+            
+            total = len(reports)
+            completed = 0
+            failed: List[Dict[str, Any]] = []
+            successful: List[str] = []
+            used_filenames: Dict[str, int] = {}
+            
+            # Thread-safe counters
+            completed_lock = threading.Lock()
+            
+            # Adaptive worker count
+            if total > 5000:
+                max_workers = min(max_workers, 8)
+                print(f"⚙️ Large export detected ({total} reports), using {max_workers} workers")
+            elif total > 1000:
+                max_workers = min(max_workers, 10)
+                print(f"⚙️ Using {max_workers} workers for {total} reports")
+            
+            if total == 0:
+                with zipfile.ZipFile(output_zip_path, "w") as zf:
+                    zf.writestr("_README.txt", "No reports found with the selected IDs")
+                return {
+                    "zip": output_zip_path,
+                    "total": 0,
+                    "failed": [],
+                    "successful": [],
+                    "folder_name": "Selected Reports (Excel)",
+                    "api_version": self.api_version,
+                    "cancelled": False,
+                    "completed": 0
+                }
+            
+            # ===== STEP 2: Define worker function =====
+            def export_single_report_excel(report: Dict) -> tuple:
+                """Export a single report as Excel - runs in thread pool"""
+                nonlocal completed
+                
+                if cancel_event and cancel_event.is_set():
+                    return ("cancelled", report, None)
+                
+                report_id = report.get("id")
+                report_name = report.get("name") or report_id
+                report_type = report.get("reportFormat", "TABULAR")
+                
+                # Notify: Starting download
+                if self.progress_callback:
+                    try:
+                        with completed_lock:
+                            current_count = completed
+                        self.progress_callback(current_count, total, report_name)
+                    except:
+                        pass
+                
+                # Generate filename (thread-safe)
+                base_name = safe_filename(report_name)
+                
+                with completed_lock:
+                    if base_name in used_filenames:
+                        used_filenames[base_name] += 1
+                        filename = f"{base_name}_{used_filenames[base_name]}.xlsx"
+                    else:
+                        used_filenames[base_name] = 1
+                        filename = f"{base_name}.xlsx"
+                
+                excel_path = tmp_dir / filename
+                
+                # Retry logic with exponential backoff
+                last_error = None
+                for attempt in range(retry_attempts):
+                    if cancel_event and cancel_event.is_set():
+                        return ("cancelled", report, None)
+                    
+                    try:
+                        # Adaptive timeout
+                        timeout = 180 if total > 5000 else 120
+                        
+                        # ✅ Step 1: Get CSV content
+                        success, csv_content = self._export_report_excel(report_id, timeout=timeout)
+                        
+                        if not success:
+                            raise Exception(csv_content)  # csv_content contains error message
+                        
+                        if not csv_content or len(csv_content.strip()) == 0:
+                            raise Exception("Empty CSV content received")
+                        
+                        # ✅ Step 2: Convert CSV to Excel
+                        conversion_success = self._csv_to_excel(csv_content, str(excel_path))
+                        
+                        if not conversion_success:
+                            raise Exception("Failed to convert CSV to Excel format")
+                        
+                        # Verify file was created
+                        if not excel_path.exists():
+                            raise Exception("Excel file was not created")
+                        
+                        # Success! Increment counter
+                        with completed_lock:
+                            completed += 1
+                            current_count = completed
+                        
+                        # Notify: Report completed successfully
+                        if self.progress_callback:
+                            try:
+                                self.progress_callback(current_count, total)
+                            except:
+                                pass
+                        
+                        return ("success", report, filename)
+                        
+                    except Exception as e:
+                        last_error = str(e)
+                        if attempt < retry_attempts - 1:
+                            wait_time = (2 ** attempt) + (attempt * 0.5)
+                            time.sleep(wait_time)
+                            continue
+                        else:
+                            break
+                
+                # Failed after all retries
+                error_content = (
+                    f"# Failed to export report as Excel after {retry_attempts} attempts\n"
+                    f"# Report Name: {report_name}\n"
+                    f"# Report ID: {report_id}\n"
+                    f"# Report Type: {report_type}\n"
+                    f"# Error: {last_error}\n"
+                )
+                
+                # Create error file (as .txt since Excel conversion failed)
+                error_path = tmp_dir / f"{base_name}_ERROR.txt"
+                error_path.write_text(error_content, encoding="utf-8")
+                
+                # Increment counter
+                with completed_lock:
+                    completed += 1
+                    current_count = completed
+                
+                # Notify: Report failed
+                if self.progress_callback:
+                    try:
+                        self.progress_callback(current_count, total)
+                    except:
+                        pass
+                
+                return ("failed", report, last_error)
+            
+            # ===== STEP 3: Export reports concurrently =====
+            print(f"🚀 Starting concurrent Excel export with {max_workers} workers...")
+            
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                # Submit all tasks
+                future_to_report = {
+                    executor.submit(export_single_report_excel, report): report 
+                    for report in reports
+                }
+                
+                # Track progress milestones
+                last_milestone = 0
+                milestone_interval = max(100, total // 20)
+                
+                # Process completed tasks
+                for future in as_completed(future_to_report):
+                    if cancel_event and cancel_event.is_set():
+                        print("⚠️ Cancellation detected, stopping remaining downloads...")
+                        for f in future_to_report:
+                            f.cancel()
+                        break
+                    
+                    try:
+                        status, report, data = future.result()
+                        
+                        if status == "success":
+                            successful.append(report.get("name"))
+                        elif status == "failed":
+                            failed.append({
+                                "id": report.get("id"),
+                                "name": report.get("name"),
+                                "type": report.get("reportFormat", "TABULAR"),
+                                "error": data
+                            })
+                        elif status == "cancelled":
+                            pass
+                        
+                        # Log progress milestones
+                        if completed - last_milestone >= milestone_interval:
+                            success_rate = (len(successful) / completed * 100) if completed > 0 else 0
+                            print(f"📊 Progress: {completed}/{total} ({completed/total*100:.1f}%) - Success rate: {success_rate:.1f}%")
+                            last_milestone = completed
+                        
+                        # Update progress callback
+                        if self.progress_callback:
+                            try:
+                                self.progress_callback(completed, total)
+                            except Exception:
+                                pass
+                                
+                    except Exception as e:
+                        report = future_to_report.get(future)
+                        if report:
+                            failed.append({
+                                "id": report.get("id"),
+                                "name": report.get("name"),
+                                "type": report.get("reportFormat", "TABULAR"),
+                                "error": str(e)
+                            })
+                            print(f"⚠️ Future error for {report.get('name')}: {str(e)[:100]}")
+            
+            # Check if cancelled
+            was_cancelled = cancel_event and cancel_event.is_set()
+            
+            # ===== STEP 4: Create ZIP file =====
+            print(f"📦 Creating ZIP file with {completed} Excel reports...")
+            
+            with zipfile.ZipFile(output_zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+                # Write files in sorted order
+                for file_path in sorted(tmp_dir.iterdir()):
+                    if file_path.is_file():
+                        zf.write(file_path, arcname=file_path.name)
+                
+                # Create Excel-specific summary
+                summary = self._create_excel_summary(
+                    total, 
+                    successful, 
+                    failed, 
+                    "Selected Reports (Excel)" + (" (CANCELLED)" if was_cancelled else "")
+                )
+                zf.writestr("_EXPORT_SUMMARY.txt", summary)
+            
+            # Final statistics
+            success_rate = (len(successful) / total * 100) if total > 0 else 0
+            print(f"✅ Excel export complete: {len(successful)}/{total} successful ({success_rate:.1f}%)")
+            if failed:
+                print(f"⚠️ Failed: {len(failed)} reports")
+            
+            return {
+                "zip": output_zip_path,
+                "total": total,
+                "failed": failed,
+                "successful": successful,
+                "folder_name": "Selected Reports (Excel)",
+                "api_version": self.api_version,
+                "cancelled": was_cancelled,
+                "completed": completed
+            }
+        
+        finally:
+            # Cleanup temporary files
+            try:
+                shutil.rmtree(tmp_dir)
+                print(f"🧹 Cleaned up temporary files")
+            except Exception as e:
+                print(f"⚠️ Error cleaning temp directory: {str(e)[:100]}")    
+    
+    
+    
     # exporter.py - Part 3: Export Methods
 # This continues the SalesforceReportExporter class
 

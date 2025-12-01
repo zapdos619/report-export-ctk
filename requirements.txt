@@ -11,8 +11,11 @@ requests>=2.31.0
 # ===== Better looking widgets (dependency of customtkinter) =====
 darkdetect>=0.8.0
 
-# ===== NEW: Memory monitoring and process management =====
+# ===== Memory monitoring and process management =====
 psutil>=5.9.0
+
+# ===== Excel file creation and manipulation =====
+openpyxl>=3.1.0
 
 # ===== Optional but recommended for better performance =====
 # Uncomment if you want faster CSV processing for very large files
