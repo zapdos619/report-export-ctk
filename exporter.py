@@ -464,9 +464,13 @@ class SalesforceReportExporter:
             print(f"Error querying reports by folder: {str(e)}")
             return []
 
+
     def search_by_keyword(self, keyword: str, cancel_event=None) -> Dict[str, Any]:
         """
         Search folders AND reports by keyword, then organize results.
+        
+        ✅ NEW: Creates a virtual "Unified Public Folder" for orphaned reports
+        that match the search but whose folder wasn't found.
         """
         try:
             # Check cancellation
@@ -506,7 +510,7 @@ class SalesforceReportExporter:
                 SELECT Id, Name, DeveloperName, FolderName, Format, 
                     CreatedDate, LastModifiedDate, OwnerId
                 FROM Report 
-                WHERE Name LIKE '%{keyword_escaped}%'
+                WHERE Name LIKE '%{keyword_escaped}%' OR FolderName LIKE '%{keyword_escaped}%'
                 ORDER BY Name
             """
             
@@ -561,15 +565,82 @@ class SalesforceReportExporter:
             
             print(f"✅ Fetched {len(additional_folders)} additional folders")
             
-            # ===== STEP 5: Combine all folders =====
-            all_folders = matching_folders + additional_folders
+            # ===== STEP 5: Identify orphaned reports =====
+            # These are reports that matched the search but whose OwnerId
+            # doesn't correspond to any folder we successfully fetched
             
-            # ===== STEP 6: Group reports by folder (MEMORY EFFICIENT) =====
-            print(f"📊 Grouping {len(matching_reports)} reports by folder...")
+            all_fetched_folder_ids = folder_ids_from_name_match | {f.get("Id") for f in additional_folders}
+            
+            orphaned_reports = []
+            valid_reports = []
+            
+            for report in matching_reports:
+                owner_id = report.get("OwnerId")
+                
+                if not owner_id or owner_id not in all_fetched_folder_ids:
+                    # This report's folder wasn't found - it's orphaned
+                    orphaned_reports.append(report)
+                else:
+                    # This report has a valid folder
+                    valid_reports.append(report)
+            
+            print(f"📊 Report classification:")
+            print(f"  ✅ Valid reports (with folders): {len(valid_reports)}")
+            print(f"  ⚠️ Orphaned reports (no folder found): {len(orphaned_reports)}")
+            
+            # ===== STEP 5B: Create virtual "Unified Public Folder" if needed =====
+            virtual_folder_id = None
+            virtual_folder = None
+            
+            if orphaned_reports:
+                # Create a virtual folder to hold orphaned reports
+                virtual_folder_id = "VIRTUAL_UNIFIED_PUBLIC_FOLDER"
+                
+                virtual_folder = {
+                    "Id": virtual_folder_id,
+                    "Name": "📁 Unified Public Folder (Search Results)",
+                    "Type": "Report",
+                    "DeveloperName": "UnifiedPublicFolder",
+                    "AccessType": "Public"
+                }
+                
+                print(f"🆕 Created virtual folder for {len(orphaned_reports)} orphaned reports")
+            
+            # ===== STEP 6: Combine all folders (virtual first, then real folders) =====
+            all_folders = []
+            
+            # ✅ Add virtual folder at TOP if it exists
+            if virtual_folder:
+                all_folders.append(virtual_folder)
+            
+            # Add real folders (name-matched + additional)
+            all_folders.extend(matching_folders)
+            all_folders.extend(additional_folders)
+            
+            # ===== STEP 7: Group reports by folder (MEMORY EFFICIENT) =====
+            print(f"📊 Grouping reports by folder...")
             
             reports_by_folder = {}
             
-            for report in matching_reports:
+            # ✅ Add orphaned reports to virtual folder FIRST
+            if virtual_folder_id and orphaned_reports:
+                reports_by_folder[virtual_folder_id] = []
+                
+                for report in orphaned_reports:
+                    reports_by_folder[virtual_folder_id].append({
+                        "id": report.get("Id"),
+                        "name": report.get("Name"),
+                        "developerName": report.get("DeveloperName"),
+                        "folderName": report.get("FolderName") or "Unified Public Folder",
+                        "reportFormat": report.get("Format", "TABULAR"),
+                        "lastModifiedDate": report.get("LastModifiedDate"),
+                        "createdDate": report.get("CreatedDate")
+                    })
+                
+                print(f"  ✅ Virtual folder: {len(orphaned_reports)} orphaned reports")
+            
+            # Group valid reports by their actual folders
+            for report in valid_reports:
                 folder_id = report.get("OwnerId")
                 if folder_id:
                     if folder_id not in reports_by_folder:
@@ -589,7 +660,7 @@ class SalesforceReportExporter:
             if cancel_event and cancel_event.is_set():
                 return {"folders": [], "reports_by_folder": {}}
             
-            # ===== STEP 7: For folders matched by name, get ALL their reports (IN CHUNKS) =====
+            # ===== STEP 8: For folders matched by name, get ALL their reports (IN CHUNKS) =====
             print(f"🔍 Step 4: Fetching all reports from {len(matching_folders)} matched folders...")
             
             for idx, folder in enumerate(matching_folders):
@@ -639,7 +710,7 @@ class SalesforceReportExporter:
                         # Continue with other folders
                         continue
             
-            # ===== STEP 8: Clean up folder metadata =====
+            # ===== STEP 9: Clean up folder metadata =====
             cleaned_folders = []
             for folder in all_folders:
                 cleaned_folders.append({
@@ -654,6 +725,11 @@ class SalesforceReportExporter:
             total_reports = sum(len(reports) for reports in reports_by_folder.values())
             print(f"✅ Search complete: {len(cleaned_folders)} folders, {total_reports} total reports")
             
+            # ✅ Log virtual folder stats if present
+            if virtual_folder_id and virtual_folder_id in reports_by_folder:
+                virtual_count = len(reports_by_folder[virtual_folder_id])
+                print(f"  📁 Virtual folder contains: {virtual_count} orphaned reports")
+            
             return {
                 "folders": cleaned_folders,
                 "reports_by_folder": reports_by_folder
@@ -662,7 +738,11 @@ class SalesforceReportExporter:
         except Exception as e:
             print(f"❌ Search error: {str(e)}")
             raise Exception(f"Search failed: {str(e)}")
-    
+
+
+
+
+  
     def _execute_soql_query(self, query: str) -> List[Dict]:
         """
         Helper method to execute a SOQL query and return records.
