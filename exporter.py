@@ -467,25 +467,6 @@ class SalesforceReportExporter:
     def search_by_keyword(self, keyword: str, cancel_event=None) -> Dict[str, Any]:
         """
         Search folders AND reports by keyword, then organize results.
-        
-        ✅ OPTIMIZED: Chunked queries + memory-efficient processing for 10,000+ reports.
-        
-        This method:
-        1. Searches folders whose NAME matches keyword
-        2. Searches reports whose NAME matches keyword (in chunks)
-        3. Fetches parent folders that contain matching reports
-        4. Groups reports by their folders
-        5. For folders matched by name, includes ALL their reports
-        
-        Args:
-            keyword: Search keyword (e.g., "Sales", "Q4", "Account")
-            cancel_event: Optional threading.Event to check for cancellation
-            
-        Returns:
-            {
-                "folders": [list of folder metadata],
-                "reports_by_folder": {folder_id: [list of reports in that folder]}
-            }
         """
         try:
             # Check cancellation
