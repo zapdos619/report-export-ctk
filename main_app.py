@@ -1876,61 +1876,87 @@ class SalesforceExporterApp(ctk.CTkToplevel):
         self._start_search(keyword)
         
     def _on_refresh_clicked(self):
-        """
-        Handle refresh button click - re-runs the last search.
-        
-        ✅ NEW: Refreshes data without user having to re-type search keyword
-        """
-        # ✅ GUARD: Check if busy
-        if self.is_loading:
-            self._log("⚠️ Search already in progress, please wait...")
-            messagebox.showinfo("Search In Progress", "Please wait for the current search to complete.")
-            return
-        
-        if self._is_export_busy():
-            self._log("⚠️ Cannot refresh while export is running")
-            messagebox.showinfo("Export In Progress", "Please wait for export to complete before refreshing.")
-            return
-        
-        # ✅ Check if user has searched before
-        if not self.last_search_keyword:
-            self._log("ℹ️ No previous search to refresh. Please search first.")
-            messagebox.showinfo(
-                "No Previous Search",
-                "You haven't searched yet.\n\n"
-                "Enter keywords in the search box and click 'Search' first."
-            )
-            return
-        
-        # ✅ Clear cache for this keyword (force fresh data)
-        keyword_lower = self.last_search_keyword.lower()
-        with self.data_lock:
-            if keyword_lower in self.search_cache:
-                del self.search_cache[keyword_lower]
-                self._log(f"🗑️ Cleared cache for '{self.last_search_keyword}'")
-        
-        # ✅ Re-run the last search
-        self._log(f"🔄 Refreshing search: '{self.last_search_keyword}'")
-        self._log("💡 Fetching latest data from Salesforce...")
+            """
+            Handle refresh button click - re-runs the last search OR searches current entry.
+            
+            ✅ FIXED: Now checks search entry FIRST before using last_search_keyword
+            """
+            # ✅ GUARD: Check if busy
+            if self.is_loading:
+                self._log("⚠️ Search already in progress, please wait...")
+                messagebox.showinfo("Search In Progress", "Please wait for the current search to complete.")
+                return
+            
+            if self._is_export_busy():
+                self._log("⚠️ Cannot refresh while export is running")
+                messagebox.showinfo("Export In Progress", "Please wait for export to complete before refreshing.")
+                return
+            
+            # ✅ CRITICAL FIX: Check what's currently in the search box
+            current_entry_text = self.left_search_entry.get().strip()
+            
+            # Decide which keyword to use:
+            # 1. If user typed something new → use that (treat as new search)
+            # 2. If search box is empty but we have last_search_keyword → use last (refresh)
+            # 3. If both empty → show error
+            
+            if current_entry_text:
+                # User has typed something in search box
+                keyword_to_search = current_entry_text
+                
+                # Check if it's different from last search
+                if self.last_search_keyword and keyword_to_search.lower() == self.last_search_keyword.lower():
+                    # Same keyword → this is a REFRESH
+                    self._log(f"🔄 Refreshing search: '{keyword_to_search}'")
+                    self._log("💡 Fetching latest data from Salesforce...")
+                    
+                    # Clear cache to force fresh data
+                    keyword_lower = keyword_to_search.lower()
+                    with self.data_lock:
+                        if keyword_lower in self.search_cache:
+                            del self.search_cache[keyword_lower]
+                            self._log(f"🗑️ Cleared cache for '{keyword_to_search}'")
+                else:
+                    # Different keyword → this is a NEW SEARCH
+                    self._log(f"🔍 New search: '{keyword_to_search}'")
+            
+            elif self.last_search_keyword:
+                # Search box is empty, but we have a previous search → use that
+                keyword_to_search = self.last_search_keyword
+                self._log(f"🔄 Refreshing last search: '{keyword_to_search}'")
+                self._log("💡 Fetching latest data from Salesforce...")
+                
+                # Clear cache to force fresh data
+                keyword_lower = keyword_to_search.lower()
+                with self.data_lock:
+                    if keyword_lower in self.search_cache:
+                        del self.search_cache[keyword_lower]
+                        self._log(f"🗑️ Cleared cache for '{keyword_to_search}'")
+                
+                # Update search entry to show what we're searching
+                self.left_search_entry.delete(0, "end")
+                self.left_search_entry.insert(0, keyword_to_search)
+            
+            else:
+                # No keyword in box and no previous search
+                self._log("ℹ️ No search keyword provided")
+                messagebox.showinfo(
+                    "No Keyword",
+                    "Please enter a search keyword first, then click Search or Refresh."
+                )
+                return
+            
+            # ✅ NEW: Show visual feedback in status label
+            try:
+                self.status_label.configure(
+                    text=f"🔄 Refreshing: {keyword_to_search}...",
+                    text_color="#1f6aa5"
+                )
+            except:
+                pass
 
-        # ✅ NEW: Show visual feedback in status label
-        try:
-            self.status_label.configure(
-                text=f"🔄 Refreshing: {self.last_search_keyword}...",
-                text_color="#1f6aa5"
-            )
-        except:
-            pass
-
-        # Update the search entry to show what we're refreshing
-        current_entry_text = self.left_search_entry.get().strip()
-        if current_entry_text != self.last_search_keyword:
-            self.left_search_entry.delete(0, "end")
-            self.left_search_entry.insert(0, self.last_search_keyword)
-
-        # Start fresh search (bypasses cache since we just cleared it)
-        self._start_search(self.last_search_keyword)
-
+            # Start search with the determined keyword
+            self._start_search(keyword_to_search)
 
 
     def _start_search(self, keyword: str):
