@@ -190,6 +190,8 @@ class SalesforceExporterApp(ctk.CTkToplevel):
         self.selected_items: Dict[str, Dict] = {}
         self.search_timer = None
         
+        self.last_search_keyword: Optional[str] = None
+        
         # ✅ NEW: Virtual tree view instance
         self.virtual_tree: Optional[VirtualTreeView] = None
         self.tree_items: Dict[str, Dict] = {}  # Keep for compatibility
@@ -227,8 +229,10 @@ class SalesforceExporterApp(ctk.CTkToplevel):
         # Keyboard shortcuts
         self.unbind('<Control-e>')
         self.unbind('<Escape>')
+        self.unbind('<F5>')  # ✅ NEW: Unbind F5 if previously bound
         self.bind('<Control-e>', lambda e: self._start_export_safe())
         self.bind('<Escape>', lambda e: self._cancel_export_safe())
+        self.bind('<F5>', lambda e: self._on_refresh_clicked())  # ✅ NEW: F5 to refresh
         
         # Window configuration tracking (bind AFTER attributes are initialized)
         self.bind('<Configure>', self._on_window_configure)
@@ -606,25 +610,25 @@ class SalesforceExporterApp(ctk.CTkToplevel):
         
         self.subtitle_label = ctk.CTkLabel(
             left_frame,
-            text="Select folders and reports to export • Ctrl+E to export • ESC to cancel",
+            text="Select folders and reports to export • F5 to refresh • Ctrl+E to export • ESC to cancel",
             font=ctk.CTkFont(size=11),
             text_color="gray"
         )
         self.subtitle_label.pack(anchor="w", pady=(3, 0))
-        
+                
         # Right side - Login status and logout button
         right_frame = ctk.CTkFrame(header_frame, fg_color="transparent")
         right_frame.pack(side="right", padx=20, pady=10)
-        
+
         # ✅ NEW: Status is now set based on session_info
         instance = self.session_info.get("instance_url", "").replace('https://', '')
         api_version = self.session_info.get("api_version", "")
         user_name = self.session_info.get("user_name", "")
-        
+
         status_text = f"🟢 {instance}"
         if api_version:
             status_text += f" (API v{api_version})"
-        
+
         self.status_label = ctk.CTkLabel(
             right_frame,
             text=status_text,
@@ -632,18 +636,36 @@ class SalesforceExporterApp(ctk.CTkToplevel):
             text_color="green"
         )
         self.status_label.pack(pady=(0, 5))
-        
-        # ✅ NEW: Show logout button instead of login
+
+        # ✅ NEW: Button container for refresh + logout
+        button_container = ctk.CTkFrame(right_frame, fg_color="transparent")
+        button_container.pack()
+
+        # ✅ NEW: Refresh button
+        self.refresh_button = ctk.CTkButton(
+            button_container,
+            text="🔄 Refresh",
+            command=self._on_refresh_clicked,
+            width=120,
+            height=32,
+            fg_color="#1f6aa5",
+            hover_color="#144870",
+            font=ctk.CTkFont(size=11, weight="bold")
+        )
+        self.refresh_button.pack(side="left", padx=(0, 5))
+        self.refresh_button.configure(state="disabled")
+
+        # ✅ MODIFIED: Logout button (same as before)
         self.logout_button = ctk.CTkButton(
-            right_frame,
+            button_container,
             text="Logout",
             command=self._logout,
-            width=150,
+            width=120,
             height=32,
             fg_color="#d32f2f",
             hover_color="#9a2222"
         )
-        self.logout_button.pack()
+        self.logout_button.pack(side="left")
     
     def _create_main_content(self):
         """Create main content area with 3 panels: Available | Actions | Selected"""
@@ -1236,6 +1258,10 @@ class SalesforceExporterApp(ctk.CTkToplevel):
         self.is_loading = False
         self.is_exporting = False
         
+        # ✅ NEW: Reset search state
+        self.last_search_keyword = None
+        self.search_cache.clear()
+        
         try:
             self.grab_release()
         except:
@@ -1284,6 +1310,7 @@ class SalesforceExporterApp(ctk.CTkToplevel):
         self._log("🔍 Ready to search!")
         self._log("💡 Enter keywords like 'Sales', 'Account', 'Q4 2024', etc.")
         self._log("💡 Press Enter or click Search button to find reports")
+        self._log("💡 Use the 🔄 Refresh button to get latest data from Salesforce")
         self._log("")
         
         # Show empty search state in tree
@@ -1532,6 +1559,16 @@ class SalesforceExporterApp(ctk.CTkToplevel):
             
             # Update export button state
             self._update_export_button_state()
+            
+            try:
+                instance = self.session_info.get("instance_url", "").replace('https://', '')
+                api_version = self.session_info.get("api_version", "")
+                status_text = f"🟢 {instance}"
+                if api_version:
+                    status_text += f" (API v{api_version})"
+                self.status_label.configure(text=status_text, text_color="green")
+            except:
+                pass
             
         except Exception as e:
             # ✅ Catch any error in completion handler
@@ -1835,8 +1872,66 @@ class SalesforceExporterApp(ctk.CTkToplevel):
         
         # Not in cache - perform search
         self._log(f"🔍 Searching for: '{keyword}'")
+        self.last_search_keyword = keyword
         self._start_search(keyword)
         
+    def _on_refresh_clicked(self):
+        """
+        Handle refresh button click - re-runs the last search.
+        
+        ✅ NEW: Refreshes data without user having to re-type search keyword
+        """
+        # ✅ GUARD: Check if busy
+        if self.is_loading:
+            self._log("⚠️ Search already in progress, please wait...")
+            messagebox.showinfo("Search In Progress", "Please wait for the current search to complete.")
+            return
+        
+        if self._is_export_busy():
+            self._log("⚠️ Cannot refresh while export is running")
+            messagebox.showinfo("Export In Progress", "Please wait for export to complete before refreshing.")
+            return
+        
+        # ✅ Check if user has searched before
+        if not self.last_search_keyword:
+            self._log("ℹ️ No previous search to refresh. Please search first.")
+            messagebox.showinfo(
+                "No Previous Search",
+                "You haven't searched yet.\n\n"
+                "Enter keywords in the search box and click 'Search' first."
+            )
+            return
+        
+        # ✅ Clear cache for this keyword (force fresh data)
+        keyword_lower = self.last_search_keyword.lower()
+        with self.data_lock:
+            if keyword_lower in self.search_cache:
+                del self.search_cache[keyword_lower]
+                self._log(f"🗑️ Cleared cache for '{self.last_search_keyword}'")
+        
+        # ✅ Re-run the last search
+        self._log(f"🔄 Refreshing search: '{self.last_search_keyword}'")
+        self._log("💡 Fetching latest data from Salesforce...")
+
+        # ✅ NEW: Show visual feedback in status label
+        try:
+            self.status_label.configure(
+                text=f"🔄 Refreshing: {self.last_search_keyword}...",
+                text_color="#1f6aa5"
+            )
+        except:
+            pass
+
+        # Update the search entry to show what we're refreshing
+        current_entry_text = self.left_search_entry.get().strip()
+        if current_entry_text != self.last_search_keyword:
+            self.left_search_entry.delete(0, "end")
+            self.left_search_entry.insert(0, self.last_search_keyword)
+
+        # Start fresh search (bypasses cache since we just cleared it)
+        self._start_search(self.last_search_keyword)
+
+
 
     def _start_search(self, keyword: str):
         """
@@ -1871,6 +1966,9 @@ class SalesforceExporterApp(ctk.CTkToplevel):
         try:
             self.search_button.configure(state="disabled", text="🔄 Searching...")
             self.left_search_entry.configure(state="disabled")
+            
+            # ✅ NEW: Also disable refresh button during search
+            self.refresh_button.configure(state="disabled")
         except Exception as e:
             print(f"⚠️ Error disabling search UI: {e}")
         
@@ -1970,6 +2068,13 @@ class SalesforceExporterApp(ctk.CTkToplevel):
         try:
             self.search_button.configure(state="normal", text="🔍 Search")
             self.left_search_entry.configure(state="normal")
+            
+            # ✅ NEW: Re-enable refresh button (only if user has searched before)
+            if self.last_search_keyword:
+                self.refresh_button.configure(state="normal")
+            else:
+                # No previous search yet, keep refresh disabled
+                self.refresh_button.configure(state="disabled")
         except Exception as e:
             print(f"⚠️ Error resetting search UI: {e}")
 
@@ -3254,6 +3359,17 @@ class SalesforceExporterApp(ctk.CTkToplevel):
             self.browse_button.configure(state=state)
             # self.all_folders_btn.configure(state=state)
             self.filename_entry.configure(state=state)
+            
+            if enabled:
+                # Re-enable only if user has searched before
+                if self.last_search_keyword:
+                    self.refresh_button.configure(state="normal")
+                else:
+                    self.refresh_button.configure(state="disabled")
+            else:
+                # Export starting, disable refresh
+                self.refresh_button.configure(state="disabled")            
+            
             
             if enabled:
                 # ✅ Export finished - restore normal UI

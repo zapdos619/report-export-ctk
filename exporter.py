@@ -502,7 +502,10 @@ class SalesforceReportExporter:
                 SELECT Id, Name, Type, DeveloperName, AccessType 
                 FROM Folder 
                 WHERE Type = 'Report' 
-                AND Name LIKE '%{keyword_escaped}%'
+                AND (
+                    Name LIKE '%{keyword_escaped}%'
+                    OR DeveloperName LIKE '%{keyword_escaped}%'
+                )
                 ORDER BY Name
             """
             
