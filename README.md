@@ -1,8 +1,8 @@
 # 📊 Salesforce Report Exporter
 
-A powerful desktop application for bulk exporting Salesforce reports to CSV format with **no 2,000 row limit**. Built with Python and CustomTkinter for a modern, responsive user experience.
+A powerful desktop application for bulk exporting Salesforce reports with **no 2,000 row limit**. Built with Python and CustomTkinter for a modern, responsive user experience.
 
-![Version](https://img.shields.io/badge/version-2.0.0-blue.svg)
+![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)
 ![Python](https://img.shields.io/badge/python-3.10%2B-brightgreen.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
 
@@ -18,16 +18,19 @@ A powerful desktop application for bulk exporting Salesforce reports to CSV form
 
 ### 🔍 **Powerful Search**
 - **Keyword Search** - Find reports and folders by name
-- **Real-time Results** - See matches as you type
+- **Real-time Results** - See matches instantly
 - **Organized View** - Reports grouped by folder
+- **Unified Public Folder** - Automatically groups orphaned public reports
 - **Cache Management** - Stores last 10 searches for instant access
 
 ### 📦 **Export Capabilities**
 - **No Row Limit** - Bypass Salesforce's 2,000 row API restriction
+- **Dual Format Support** - Export as CSV or Excel (.xlsx)
 - **Batch Export** - Select multiple reports at once
 - **ZIP Packaging** - All reports bundled in a single file
 - **Progress Tracking** - Real-time progress with ETA and speed
 - **Error Recovery** - Retry failed exports automatically
+- **Auto-rename** - Prevents filename conflicts automatically
 
 ### 🛡️ **Security & Reliability**
 - **SOAP Authentication** - No Connected App required
@@ -38,9 +41,9 @@ A powerful desktop application for bulk exporting Salesforce reports to CSV form
 
 ### 🎨 **Modern UI**
 - **Dark Mode** - Easy on the eyes
-- **Responsive Design** - Adapts to different screen sizes
+- **Responsive Design** - Optimized 1200×740 layout
 - **Intuitive Layout** - Clean, organized interface
-- **Keyboard Shortcuts** - `Ctrl+E` to export, `ESC` to cancel
+- **Keyboard Shortcuts** - `F5` to refresh, `Ctrl+E` to export, `ESC` to cancel
 - **Activity Log** - Track all operations in real-time
 
 ---
@@ -57,7 +60,6 @@ A powerful desktop application for bulk exporting Salesforce reports to CSV form
 ## 🔧 Installation
 
 ### 1️⃣ Clone the Repository
-
 ```bash
 git clone https://github.com/yourusername/salesforce-report-exporter.git
 cd salesforce-report-exporter
@@ -65,27 +67,106 @@ cd salesforce-report-exporter
 
 ### 2️⃣ Create Virtual Environment
 
+#### **Windows:**
 ```bash
-# Windows
-python -m venv .venv
-.venv\Scripts\activate
+python -m venv venv
+venv\Scripts\activate
+```
 
-# macOS/Linux
-python3 -m venv .venv
-source .venv/bin/activate
+#### **macOS/Linux:**
+```bash
+python3 -m venv venv
+source venv/bin/activate
 ```
 
 ### 3️⃣ Install Dependencies
-
 ```bash
 pip install -r requirements.txt
 ```
 
 ### 4️⃣ Run the Application
-
 ```bash
 python main.py
 ```
+
+---
+
+## 📦 Creating Portable Executable (.exe)
+
+Want to distribute the app without requiring Python installation? Create a standalone executable!
+
+### **Prerequisites**
+
+Install PyInstaller:
+```bash
+pip install pyinstaller
+```
+
+### **Build Executable (Windows)**
+
+#### **Option 1: Single File (Recommended)**
+```bash
+pyinstaller --onefile --windowed --name "SalesforceReportExporter" --icon=app_icon.ico main.py
+```
+
+#### **Option 2: Directory Bundle (Faster Startup)**
+```bash
+pyinstaller --onedir --windowed --name "SalesforceReportExporter" --icon=app_icon.ico main.py
+```
+
+### **Build Parameters Explained**
+- `--onefile` - Packages everything into a single .exe file
+- `--onedir` - Creates a folder with .exe and dependencies (faster startup)
+- `--windowed` - No console window (GUI only)
+- `--name` - Output executable name
+- `--icon` - Application icon (optional, requires .ico file)
+
+### **Output Location**
+- **Single file:** `dist/SalesforceReportExporter.exe`
+- **Directory:** `dist/SalesforceReportExporter/SalesforceReportExporter.exe`
+
+### **Build for macOS**
+```bash
+pyinstaller --onefile --windowed --name "SalesforceReportExporter" main.py
+```
+Output: `dist/SalesforceReportExporter` (macOS app bundle)
+
+### **Build for Linux**
+```bash
+pyinstaller --onefile --name "SalesforceReportExporter" main.py
+```
+Output: `dist/SalesforceReportExporter` (Linux executable)
+
+### **Advanced: Custom Build Configuration**
+
+Create a `build.spec` file for more control:
+```bash
+pyinstaller --name "SalesforceReportExporter" --windowed main.py
+```
+
+Then edit the generated `SalesforceReportExporter.spec` file and rebuild:
+```bash
+pyinstaller SalesforceReportExporter.spec
+```
+
+### **Troubleshooting Build Issues**
+
+**Issue:** "Module not found" errors
+```bash
+# Solution: Reinstall dependencies and rebuild
+pip install -r requirements.txt --force-reinstall
+pyinstaller --clean SalesforceReportExporter.spec
+```
+
+**Issue:** Large file size (100MB+)
+```bash
+# Solution: Exclude unnecessary packages
+pyinstaller --onefile --windowed --exclude-module matplotlib --exclude-module numpy main.py
+```
+
+**Issue:** Antivirus flags executable
+- This is common with PyInstaller. Add exception in your antivirus software.
+- Consider code signing the executable for distribution.
 
 ---
 
@@ -118,6 +199,8 @@ python main.py
 
 > 💡 **Tip:** Search results are cached - searching the same keyword again is instant!
 
+> 💡 **Feature:** Public reports without folders are automatically grouped in "🌐 Unified Public Folder"
+
 ---
 
 ### **Step 3: Select Reports**
@@ -132,13 +215,23 @@ python main.py
 
 ### **Step 4: Export**
 
-1. Click **Browse** to choose save location
-2. (Optional) Edit the ZIP filename
-3. Click **🚀 Export Reports** or press `Ctrl+E`
-4. Wait for progress to complete
-5. Open the exported ZIP file
+1. **Choose format:**
+   - **CSV** - Fast, recommended for large exports
+   - **Excel** - Formatted .xlsx files (requires `openpyxl`)
+
+2. Click **Browse** to choose save location
+
+3. (Optional) Edit the ZIP filename
+
+4. Click **🚀 Export Reports** or press `Ctrl+E`
+
+5. Wait for progress to complete
+
+6. Open the exported ZIP file
 
 > 💡 **Tip:** Press `ESC` to cancel an export in progress
+
+> 💡 **Tip:** If a file already exists, it will be auto-renamed (e.g., `report_1.zip`, `report_2.zip`)
 
 ---
 
@@ -149,9 +242,9 @@ python main.py
 | Shortcut | Action |
 |----------|--------|
 | `Enter` | Execute search / Login |
+| `F5` | Refresh search results |
 | `Ctrl+E` | Start export |
 | `ESC` | Cancel current operation |
-| `Ctrl+D` | Print debug state (debug mode) |
 
 ---
 
@@ -164,13 +257,37 @@ python main.py
 
 ---
 
-### **Export Options**
+### **Export Formats**
+
+#### **CSV Format**
+- ✅ Fast export (recommended for 1000+ reports)
+- ✅ Small file size
+- ✅ Works with all tools (Excel, Google Sheets, Python, R)
+- ✅ No dependencies required
+
+#### **Excel Format (.xlsx)**
+- ✅ Professional formatting
+- ✅ Easier to open (no import steps)
+- ✅ Includes styled headers
+- ✅ Auto-sized columns
+- ⚠️ Requires `openpyxl` library
+- ⚠️ Slower for large reports
+
+**Install Excel support:**
+```bash
+pip install openpyxl
+```
+
+---
+
+### **Export Performance**
 
 #### **Concurrent Downloads**
-The app downloads up to 10 reports simultaneously for faster exports:
+The app downloads up to 10 reports simultaneously:
 - Small exports (1-10 reports): ~5-10 seconds
 - Medium exports (50 reports): ~30-60 seconds
 - Large exports (500+ reports): ~3-5 minutes
+- Very large (5000+ reports): ~20-30 minutes
 
 #### **Progress Tracking**
 Real-time metrics during export:
@@ -183,11 +300,11 @@ Failed reports are:
 - ✅ Logged in the activity log
 - ✅ Saved with error details in the ZIP
 - ✅ Listed in the export summary file
+- ✅ Automatically retried (up to 3 attempts)
 
 ---
 
 ## 📂 Project Structure
-
 ```
 salesforce-report-exporter/
 │
@@ -199,7 +316,9 @@ salesforce-report-exporter/
 ├── virtual_tree.py        # Virtual scrolling tree view
 ├── requirements.txt       # Python dependencies
 ├── README.md             # This file
-└── .gitignore            # Git ignore rules
+├── .gitignore            # Git ignore rules
+└── build/                # Build artifacts (created by PyInstaller)
+    └── SalesforceReportExporter/
 ```
 
 ---
@@ -234,10 +353,6 @@ Your **Security Token** is required unless:
 
 ### **Common Issues**
 
-#### **❌ "Not Responding" / UI Freezes**
-- **Cause:** Running on old version without threading fixes
-- **Solution:** Update to latest version (v2.0.0+)
-
 #### **❌ "Session Expired" Error**
 - **Cause:** Inactive for too long
 - **Solution:** Click Logout and login again
@@ -254,9 +369,13 @@ Your **Security Token** is required unless:
 - **Cause:** Network issues or wrong custom domain
 - **Solution:** Check internet connection and domain spelling
 
-#### **❌ Minimize Button Doesn't Work**
-- **Cause:** Running old version
-- **Solution:** Update to v2.0.0+ (has minimize fix)
+#### **❌ "Excel export not available"**
+- **Cause:** `openpyxl` library not installed
+- **Solution:** Run `pip install openpyxl` and restart app
+
+#### **❌ Executable won't run / Antivirus blocks**
+- **Cause:** PyInstaller executables often trigger false positives
+- **Solution:** Add exception in antivirus or build with code signing
 
 ---
 
@@ -265,11 +384,11 @@ Your **Security Token** is required unless:
 Enable debug mode for troubleshooting:
 
 1. Open `main_app.py`
-2. Find the `__init__` method
+2. Find the `__init__` method (around line 100)
 3. Uncomment this line:
-   ```python
+```python
    self._enable_debug_mode()
-   ```
+```
 4. Restart the app
 5. Press `Ctrl+D` to print current state
 
@@ -283,6 +402,7 @@ Enable debug mode for troubleshooting:
 2. **Stable internet** - Use wired connection if possible
 3. **Batch exports** - Split into multiple smaller exports
 4. **Off-peak hours** - Export during low Salesforce usage times
+5. **Use CSV format** - Faster than Excel for large datasets
 
 ### **For Slow Searches:**
 
@@ -316,26 +436,6 @@ Open an issue with:
 
 ---
 
-## 🔄 Changelog
-
-### **v2.0.0** (Latest) - 2025-01-30
-- ✅ **Fixed:** "Not Responding" freeze during search
-- ✅ **Fixed:** Minimize button now works
-- ✅ **Added:** Virtual scrolling for 10,000+ reports
-- ✅ **Added:** Search result caching
-- ✅ **Added:** Concurrent downloads (10x faster)
-- ✅ **Added:** Real-time progress with ETA
-- ✅ **Improved:** Thread safety and error handling
-- ✅ **Improved:** State management (atomic operations)
-
-### **v1.0.0** - 2024-12-15
-- Initial release
-- Basic search and export functionality
-- SOAP authentication
-- Single-threaded downloads
-
----
-
 ## 📜 License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
@@ -357,18 +457,11 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 Create a folder structure for your exports:
 ```
 exports/
-├── 2025-01-30_sales_reports.zip
-├── 2025-01-30_marketing_reports.zip
+├── 2025-01-02_sales_reports.zip
+├── 2025-01-02_marketing_reports.zip
 └── archive/
     └── 2024-12-15_old_reports.zip
 ```
-
-### **Scheduling Exports**
-
-While the app doesn't have built-in scheduling, you can:
-1. Export reports manually on a regular schedule
-2. Use Windows Task Scheduler / cron to run exports
-3. Build a script wrapper around the exporter module
 
 ### **Backup Strategy**
 
@@ -384,7 +477,7 @@ While the app doesn't have built-in scheduling, you can:
 - **No OAuth2 support** - Uses SOAP login only
 - **No report scheduling** - Manual export only
 - **No report filtering** - Must select reports manually
-- **No custom formats** - CSV export only
+- **CSV and Excel only** - No other export formats
 - **No email delivery** - Manual download required
 
 ---
@@ -395,12 +488,13 @@ While the app doesn't have built-in scheduling, you can:
 
 - [ ] OAuth2 authentication support
 - [ ] Scheduled automatic exports
-- [ ] Excel (XLSX) export format
-- [ ] Report filtering by date/owner
+- [ ] Report filtering by date/owner/type
 - [ ] Email delivery of exports
 - [ ] Command-line interface (CLI)
 - [ ] Docker containerization
 - [ ] Web interface version
+- [ ] Report preview before export
+- [ ] Custom export templates
 
 ---
 
@@ -436,4 +530,4 @@ If this project helped you, please consider:
 
 **Made with ❤️ for Salesforce Admins and Developers**
 
-*Last Updated: January 30, 2025*
+*Version 1.0.0 - Released January 2025*
