@@ -165,7 +165,7 @@ class SalesforceExporterApp(ctk.CTkToplevel):
         
         # Window setup (after basic state init)
         self.title("Salesforce Report Exporter")
-        self.geometry("1200x800")
+        self.geometry("1200x740")
         
         if master and master.winfo_exists():
             try:
@@ -280,14 +280,14 @@ class SalesforceExporterApp(ctk.CTkToplevel):
         self.update_idletasks()
         
         # Explicitly set the geometry again to ensure it's correct
-        self.geometry("1200x800")
+        self.geometry("1200x740")
         
         # Wait a tiny bit for the geometry to apply
         self.update_idletasks()
         
         # Now calculate center position
         width = 1200
-        height = 800
+        height = 740
         x = (self.winfo_screenwidth() // 2) - (width // 2)
         y = (self.winfo_screenheight() // 2) - (height // 2)
         
@@ -593,7 +593,7 @@ class SalesforceExporterApp(ctk.CTkToplevel):
             
     def _create_header(self):
         """Create header section with title and login status"""
-        header_frame = ctk.CTkFrame(self, height=80, corner_radius=0)
+        header_frame = ctk.CTkFrame(self, height=70, corner_radius=0)
         header_frame.grid(row=0, column=0, sticky="ew", padx=0, pady=0)
         header_frame.grid_propagate(False)
         
@@ -615,12 +615,12 @@ class SalesforceExporterApp(ctk.CTkToplevel):
             text_color="gray"
         )
         self.subtitle_label.pack(anchor="w", pady=(3, 0))
-                
+        
         # Right side - Login status and logout button
         right_frame = ctk.CTkFrame(header_frame, fg_color="transparent")
         right_frame.pack(side="right", padx=20, pady=10)
 
-        # ✅ NEW: Status is now set based on session_info
+        # Status based on session_info
         instance = self.session_info.get("instance_url", "").replace('https://', '')
         api_version = self.session_info.get("api_version", "")
         user_name = self.session_info.get("user_name", "")
@@ -637,11 +637,11 @@ class SalesforceExporterApp(ctk.CTkToplevel):
         )
         self.status_label.pack(pady=(0, 5))
 
-        # ✅ NEW: Button container for refresh + logout
+        # Button container for refresh + logout (far right positioning)
         button_container = ctk.CTkFrame(right_frame, fg_color="transparent")
         button_container.pack()
 
-        # ✅ NEW: Refresh button
+        # Refresh button
         self.refresh_button = ctk.CTkButton(
             button_container,
             text="🔄 Refresh",
@@ -655,7 +655,7 @@ class SalesforceExporterApp(ctk.CTkToplevel):
         self.refresh_button.pack(side="left", padx=(0, 5))
         self.refresh_button.configure(state="disabled")
 
-        # ✅ MODIFIED: Logout button (same as before)
+        # Logout button (far right)
         self.logout_button = ctk.CTkButton(
             button_container,
             text="Logout",
@@ -666,6 +666,7 @@ class SalesforceExporterApp(ctk.CTkToplevel):
             hover_color="#9a2222"
         )
         self.logout_button.pack(side="left")
+
     
     def _create_main_content(self):
         """Create main content area with 3 panels: Available | Actions | Selected"""
@@ -828,93 +829,92 @@ class SalesforceExporterApp(ctk.CTkToplevel):
         )
         self.clear_selected_button.grid(row=1, column=0, sticky="ew", pady=(0, 3))  # ✅ REDUCED from pady=(0, 5)
     
-    
     def _create_bottom_section(self):
-        """Create bottom section with left/right split layout and export format selection"""
+        """Create bottom section with optimized 2-column layout"""
         
         bottom_frame = ctk.CTkFrame(self, corner_radius=0)
         bottom_frame.grid(row=2, column=0, sticky="ew", padx=0, pady=0)
-        bottom_frame.grid_columnconfigure(0, weight=1)  # Left side expands
-        bottom_frame.grid_columnconfigure(1, weight=1)  # Right side expands
+        bottom_frame.grid_columnconfigure(0, weight=1)  # Left column expands
+        bottom_frame.grid_columnconfigure(1, weight=1)  # Right column expands
         
-        # ========== LEFT SIDE: File Naming & Save Location ==========
-        left_section = ctk.CTkFrame(bottom_frame, fg_color="transparent")
-        left_section.grid(row=0, column=0, sticky="nsew", padx=(10, 5), pady=(10, 5))
-        left_section.grid_columnconfigure(0, weight=1)
+        # ========== TOP ROW: 2-Column Layout ==========
+        # ✅ UPDATED: Uniform padding between columns (10px each side = 20px gap)
         
-        # File naming section
-        file_frame = ctk.CTkFrame(left_section)
-        file_frame.grid(row=0, column=0, sticky="ew", pady=(0, 5))
-        file_frame.grid_columnconfigure(1, weight=1)
+        # LEFT COLUMN: File naming
+        left_column = ctk.CTkFrame(bottom_frame, fg_color="transparent")
+        left_column.grid(row=0, column=0, sticky="nsew", padx=(10, 10), pady=(8, 5))  # ✅ Changed from (10, 5)
+        left_column.grid_columnconfigure(1, weight=1)  # Entry expands
         
-        # ZIP Filename label
+        # RIGHT COLUMN: Export format and button
+        right_column = ctk.CTkFrame(bottom_frame, fg_color="transparent")
+        right_column.grid(row=0, column=1, sticky="nsew", padx=(10, 10), pady=(8, 5))  # ✅ Changed from (5, 10)
+        right_column.grid_columnconfigure(1, weight=1)  # Format container expands
+        
+        # ========== LEFT COLUMN - ROW 0: ZIP Filename ==========
         zip_label = ctk.CTkLabel(
-            file_frame,
+            left_column,
             text="ZIP Filename:",
             font=ctk.CTkFont(size=12, weight="bold"),
             width=120
         )
-        zip_label.grid(row=0, column=0, padx=(15, 10), pady=10, sticky="w")
+        zip_label.grid(row=0, column=0, padx=(15, 10), pady=(0, 5), sticky="w")
         
-        # Filename entry
         self.filename_entry = ctk.CTkEntry(
-            file_frame,
-            placeholder_text="salesforce_reports_20251126_0026.zip",
+            left_column,
+            placeholder_text="salesforce_reports_20251201.zip",
             height=35
         )
-        self.filename_entry.grid(row=0, column=1, sticky="ew", padx=(0, 15), pady=10)
+        self.filename_entry.grid(row=0, column=1, sticky="ew", padx=(0, 15), pady=(0, 5))
         
         # Auto-generate timestamp filename
         self._generate_default_filename()
         
-        # Save location section
-        location_frame = ctk.CTkFrame(left_section)
-        location_frame.grid(row=1, column=0, sticky="ew", pady=(0, 5))
-        location_frame.grid_columnconfigure(1, weight=1)
-        
+        # ========== LEFT COLUMN - ROW 1: Save Location ==========
+        # ✅ UPDATED: Increased top padding from 0 to 10 for better row separation
         location_label = ctk.CTkLabel(
-            location_frame,
+            left_column,
             text="Save Location:",
             font=ctk.CTkFont(size=12, weight="bold"),
             width=120
         )
-        location_label.grid(row=0, column=0, padx=(15, 10), pady=10, sticky="w")
+        location_label.grid(row=1, column=0, padx=(15, 10), pady=(10, 5), sticky="w")  # ✅ Changed from (0, 5)
+        
+        # Container for entry + browse button
+        location_container = ctk.CTkFrame(left_column, fg_color="transparent")
+        location_container.grid(row=1, column=1, sticky="ew", padx=(0, 15), pady=(10, 5))  # ✅ Changed from (0, 5)
+        location_container.grid_columnconfigure(0, weight=1)
         
         self.location_entry = ctk.CTkEntry(
-            location_frame,
+            location_container,
             placeholder_text="Click Browse to select save location...",
             height=35,
             state="readonly"
         )
-        self.location_entry.grid(row=0, column=1, sticky="ew", padx=(0, 10), pady=10)
+        self.location_entry.grid(row=0, column=0, sticky="ew", padx=(0, 10))
         
         self.browse_button = ctk.CTkButton(
-            location_frame,
+            location_container,
             text="Browse...",
             command=self._browse_save_location,
             width=100,
             height=35
         )
-        self.browse_button.grid(row=0, column=2, padx=(0, 15), pady=10)
-        
-        # ✅ NEW: Export Format Selection Section
-        format_frame = ctk.CTkFrame(left_section)
-        format_frame.grid(row=2, column=0, sticky="ew", pady=(0, 5))
-        format_frame.grid_columnconfigure(1, weight=1)
-        
+        self.browse_button.grid(row=0, column=1)
+
+    # ========== RIGHT COLUMN - ROW 0: Export Format ==========
         format_label = ctk.CTkLabel(
-            format_frame,
+            right_column,
             text="Export Format:",
             font=ctk.CTkFont(size=12, weight="bold"),
             width=120
         )
-        format_label.grid(row=0, column=0, padx=(15, 10), pady=10, sticky="w")
+        format_label.grid(row=0, column=0, padx=(15, 10), pady=(0, 5), sticky="w")
         
         # Radio button container
-        radio_container = ctk.CTkFrame(format_frame, fg_color="transparent")
-        radio_container.grid(row=0, column=1, sticky="w", padx=(0, 15), pady=10)
+        radio_container = ctk.CTkFrame(right_column, fg_color="transparent")
+        radio_container.grid(row=0, column=1, sticky="w", padx=(0, 15), pady=(0, 5))
         
-        # ✅ NEW: Export format variable (default: CSV)
+        # Export format variable (default: CSV)
         self.export_format = ctk.StringVar(value="csv")
         
         # CSV Radio Button
@@ -939,28 +939,15 @@ class SalesforceExporterApp(ctk.CTkToplevel):
         )
         self.excel_radio.pack(side="left")
         
-        # Format description label
-        self.format_description = ctk.CTkLabel(
-            format_frame,
-            text="💡 CSV is faster for large exports",
-            font=ctk.CTkFont(size=10),
-            text_color="gray"
-        )
-        self.format_description.grid(row=1, column=1, sticky="w", padx=(0, 15), pady=(0, 5))
+        # ========== RIGHT COLUMN - ROW 1: Export/Cancel Button ==========
+        # ✅ UPDATED: Increased top padding from 0 to 10 to match left column row separation
+        button_container = ctk.CTkFrame(right_column, fg_color="transparent")
+        button_container.grid(row=1, column=0, columnspan=2, sticky="ew", padx=(15, 15), pady=(10, 5))  # ✅ Changed from (0, 5)
+        button_container.grid_columnconfigure(0, weight=1)
         
-        # ========== RIGHT SIDE: Export Button & Progress ==========
-        right_section = ctk.CTkFrame(bottom_frame, fg_color="transparent")
-        right_section.grid(row=0, column=1, sticky="nsew", padx=(5, 10), pady=(10, 5))
-        right_section.grid_columnconfigure(0, weight=1)
-        right_section.grid_rowconfigure(1, weight=1)  # Progress section expands
-        
-        # Export button (positioned at top-right)
-        export_button_container = ctk.CTkFrame(right_section, fg_color="transparent")
-        export_button_container.grid(row=0, column=0, sticky="ew", pady=(0, 5))
-        export_button_container.grid_columnconfigure(0, weight=1)
-        
+        # Export button
         self.export_button = ctk.CTkButton(
-            export_button_container,
+            button_container,
             text="🚀 Export Reports",
             command=self._start_export_safe,
             height=45,
@@ -969,11 +956,11 @@ class SalesforceExporterApp(ctk.CTkToplevel):
             hover_color="#144870",
             state="disabled"
         )
-        self.export_button.grid(row=0, column=0, sticky="ew", padx=(0, 0))
+        self.export_button.grid(row=0, column=0, sticky="ew")
         
         # Cancel button (hidden by default, overlays export button)
         self.cancel_button = ctk.CTkButton(
-            export_button_container,
+            button_container,
             text="🛑 Cancel Export",
             command=self._cancel_export,
             height=45,
@@ -982,40 +969,39 @@ class SalesforceExporterApp(ctk.CTkToplevel):
             hover_color="#9a2222",
             state="disabled"
         )
-        self.cancel_button.grid(row=0, column=0, sticky="ew", padx=(0, 0))
+        self.cancel_button.grid(row=0, column=0, sticky="ew")
         self.cancel_button.grid_remove()  # Hide initially
         self.cancel_button.lower()
         
-        # Progress section
-        progress_section = ctk.CTkFrame(right_section)
-        progress_section.grid(row=1, column=0, sticky="nsew", pady=(5, 0))
-        progress_section.grid_columnconfigure(0, weight=1)
-        progress_section.grid_rowconfigure(0, weight=0)
-        progress_section.grid_rowconfigure(1, weight=0)
+        # ========== MIDDLE ROW: Progress Bar (Full Width) - UNCHANGED ==========
+        progress_frame = ctk.CTkFrame(bottom_frame, fg_color="transparent")
+        progress_frame.grid(row=1, column=0, columnspan=2, sticky="ew", padx=10, pady=(3, 3))
+        progress_frame.grid_columnconfigure(0, weight=1)
         
         # Progress bar
-        self.progress_bar = ctk.CTkProgressBar(progress_section, height=20)
-        self.progress_bar.grid(row=0, column=0, sticky="ew", padx=10, pady=(10, 5))
+        self.progress_bar = ctk.CTkProgressBar(progress_frame, height=20)
+        self.progress_bar.grid(row=0, column=0, sticky="ew", pady=(0, 5))
         self.progress_bar.set(0)
         
-        # Progress label
+        # Progress label (below progress bar)
         self.progress_label = ctk.CTkLabel(
-            progress_section,
+            progress_frame,
             text="Ready to export",
             font=ctk.CTkFont(size=11),
             text_color="gray"
         )
-        self.progress_label.grid(row=1, column=0, sticky="w", padx=15, pady=(0, 10))
+        self.progress_label.grid(row=1, column=0, sticky="w", pady=(0, 5))
         
-        # ========== BOTTOM ROW: Activity Log (spans both columns) ==========
-        log_frame = ctk.CTkFrame(bottom_frame, height=150)
-        log_frame.grid(row=1, column=0, columnspan=2, sticky="ew", padx=10, pady=(5, 10))
+        # ========== BOTTOM ROW: Activity Log - UNCHANGED ==========
+        log_frame = ctk.CTkFrame(bottom_frame, height=120)
+        log_frame.grid(row=2, column=0, columnspan=2, sticky="ew", padx=10, pady=(0, 5))
         log_frame.grid_propagate(False)
         log_frame.grid_rowconfigure(1, weight=1)
         log_frame.grid_columnconfigure(0, weight=1)
         
+        # Log header
         log_header_frame = ctk.CTkFrame(log_frame, fg_color="transparent")
-        log_header_frame.grid(row=0, column=0, sticky="ew", padx=10, pady=(10, 5))
+        log_header_frame.grid(row=0, column=0, sticky="ew", padx=10, pady=(8, 3))
         
         log_header_label = ctk.CTkLabel(
             log_header_frame,
@@ -1042,14 +1028,17 @@ class SalesforceExporterApp(ctk.CTkToplevel):
             fg_color="#1a1a1a"
         )
         self.log_textbox.grid(row=1, column=0, sticky="nsew", padx=10, pady=(0, 10))
-        self.log_textbox.configure(state="disabled")
+        self.log_textbox.configure(state="disabled")   
+
+
+
     
     def _on_format_changed(self):
         """
         Handle export format radio button change.
-        Updates filename extension and description text.
+        Updates filename extension.
         
-        ✅ Thread-safe and updates UI immediately
+        ✅ UPDATED: Removed format_description label updates
         """
         selected_format = self.export_format.get()
         
@@ -1070,12 +1059,6 @@ class SalesforceExporterApp(ctk.CTkToplevel):
             else:
                 new_filename = current_filename
             
-            # Update description
-            self.format_description.configure(
-                text="💡 CSV is faster for large exports",
-                text_color="gray"
-            )
-            
             self._log("📄 Export format: CSV (zipped)")
             
         else:  # xlsx
@@ -1089,20 +1072,14 @@ class SalesforceExporterApp(ctk.CTkToplevel):
             else:
                 new_filename = current_filename
             
-            # Update description
-            self.format_description.configure(
-                text="💡 Excel format includes formatting and is easier to open",
-                text_color="#1f6aa5"
-            )
-            
             self._log("📊 Export format: Excel (.xlsx, zipped)")
         
         # Update filename entry
         self.filename_entry.delete(0, "end")
         self.filename_entry.insert(0, new_filename)
         
-        # Update export button state (in case it affects validation)
-        self._update_export_button_state()   
+        # Update export button state
+        self._update_export_button_state()
     
     
     def _generate_default_filename(self):
@@ -2320,12 +2297,14 @@ class SalesforceExporterApp(ctk.CTkToplevel):
         # Update export button state
         self._update_export_button_state()
     
+    
     def _check_excel_dependencies(self):
         """
         Check if Excel export dependencies are installed.
         Shows a warning if missing but doesn't block the app.
         
         ✅ Called during app initialization
+        ✅ UPDATED: Removed format_description updates
         """
         try:
             import openpyxl
@@ -2339,10 +2318,7 @@ class SalesforceExporterApp(ctk.CTkToplevel):
             # Disable Excel radio button
             try:
                 self.excel_radio.configure(state="disabled")
-                self.format_description.configure(
-                    text="⚠️ Excel export requires 'openpyxl' library (pip install openpyxl)",
-                    text_color="orange"
-                )
+                # ✅ REMOVED: format_description label updates (no longer exists)
             except:
                 pass
     
